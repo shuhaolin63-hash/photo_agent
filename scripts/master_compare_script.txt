@@ -1,0 +1,373 @@
+# 大师风格比对脚本（Python伪代码）
+
+"""
+文件名：master_compare_script.txt
+用途：使用CLIP向量进行大师风格比对
+说明：提取用户照片的CLIP特征向量，与大师风格向量库进行余弦相似度比对
+"""
+
+import torch
+import clip
+import numpy as np
+import json
+from typing import Dict, List, Tuple
+from PIL import Image
+
+# ============================================================
+# 大师风格向量库
+# ============================================================
+class MasterStyleLibrary:
+    """大师风格向量库管理器"""
+
+    def __init__(self, library_path: str = "master_style_vectors.json"):
+        self.library_path = library_path
+        self.vectors = self._load_library()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model, self.preprocess = clip.load("ViT-B/32", device=self.device)
+
+    def _load_library(self) -> Dict:
+        """加载预计算的大师风格向量库"""
+        # 格式：{master_id: {"name_cn": "...", "genre": "...", "vector": [512 floats]}}
+        try:
+            with open(self.library_path, "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            print(f"[Warning] 向量库文件不存在: {self.library_path}")
+            print("[Info] 请先运行 build_master_library() 生成向量库")
+            return {}
+
+    # --------------------------------------------------------
+    # 构建大师向量库（离线运行一次）
+    # --------------------------------------------------------
+    def build_master_library(self, master_works_dir: str):
+        """
+        从大师作品目录构建风格向量库
+
+        Args:
+            master_works_dir: 大师作品照片目录结构：
+                master_works_dir/
+                ├── ansel_adams/
+                │   ├── photo1.jpg
+                │   ├── photo2.jpg
+                │   └── ...
+                ├── bresson/
+                │   ├── photo1.jpg
+                │   └── ...
+                └── ...
+        """
+        import os
+
+        library = {}
+
+        master_dirs = {
+            "ansel_adams": "安塞尔·亚当斯",
+            "frans_lanting": "弗兰斯·兰廷",
+            "charlie_waite": "查理·韦特",
+            "carleton_watkins": "卡尔顿·沃特金斯",
+            "bresson": "亨利·卡蒂埃-布列松",
+            "lange": "多萝西娅·兰格",
+            "mccurry": "史蒂夫·麦凯瑞",
+            "salgado": "塞巴斯蒂昂·萨尔加多",
+            "smith": "尤金·史密斯",
+            "evans": "沃克·埃文斯",
+        }
+
+        for master_id, master_name in master_dirs.items():
+            master_dir = os.path.join(master_works_dir, master_id)
+            if not os.path.exists(master_dir):
+                print(f"[Skip] 目录不存在: {master_dir}")
+                continue
+
+            # 收集该大师的所有作品
+            image_files = [
+                f for f in os.listdir(master_dir)
+                if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+            ]
+
+            if not image_files:
+                print(f"[Skip] 无图片: {master_dir}")
+                continue
+
+            # 提取每张作品的CLIP向量
+            vectors = []
+            for img_file in image_files[:20]:  # 每位大师最多20张
+                img_path = os.path.join(master_dir, img_file)
+                try:
+                    vector = self._encode_image(img_path)
+                    vectors.append(vector)
+                except Exception as e:
+                    print(f"[Error] 处理失败: {img_path} - {e}")
+
+            if vectors:
+                # 计算平均向量作为该大师的"风格核心向量"
+                avg_vector = np.mean(vectors, axis=0)
+                avg_vector = avg_vector / np.linalg.norm(avg_vector)  # L2归一化
+
+                library[master_id] = {
+                    "name_cn": master_name,
+                    "genre": self._get_genre(master_id),
+                    "vector": avg_vector.tolist(),
+                    "num_samples": len(vectors),
+                }
+                print(f"[OK] {master_name}: {len(vectors)}张作品已处理")
+
+        # 保存向量库
+        with open(self.library_path, "w") as f:
+            json.dump(library, f, ensure_ascii=False, indent=2)
+        print(f"[Done] 向量库已保存: {self.library_path}")
+
+    # --------------------------------------------------------
+    # 图像编码
+    # --------------------------------------------------------
+    def _encode_image(self, image_path: str) -> np.ndarray:
+        """使用CLIP编码图像为512维向量"""
+        image = self.preprocess(Image.open(image_path)).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            image_features = self.model.encode_image(image)
+
+        # L2归一化
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        return image_features.cpu().numpy().flatten()
+
+    # --------------------------------------------------------
+    # 风格比对
+    # --------------------------------------------------------
+    def compare(self, user_image_path: str, top_k: int = 5) -> List[Dict]:
+        """
+        将用户照片与所有大师进行风格比对
+
+        Args:
+            user_image_path: 用户照片路径
+            top_k: 返回前k个匹配结果
+
+        Returns:
+            排序后的匹配结果列表
+        """
+        if not self.vectors:
+            print("[Error] 向量库为空，请先构建")
+            return []
+
+        # 1. 提取用户照片的CLIP向量
+        user_vector = self._encode_image(user_image_path)
+
+        # 2. 计算与每位大师的余弦相似度
+        results = []
+        for master_id, master_info in self.vectors.items():
+            master_vector = np.array(master_info["vector"])
+            similarity = float(np.dot(user_vector, master_vector))
+            results.append({
+                "master_id": master_id,
+                "master_name": master_info["name_cn"],
+                "genre": master_info["genre"],
+                "similarity": round(similarity, 4),
+            })
+
+        # 3. 按相似度排序
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+
+        # 4. 过滤低相似度结果
+        results = [r for r in results if r["similarity"] > 0.3]
+
+        # 5. 返回Top-K
+        return results[:top_k]
+
+    # --------------------------------------------------------
+    # 题材匹配
+    # --------------------------------------------------------
+    def match_by_genre(self, user_image_path: str,
+                       target_genre: str) -> List[Dict]:
+        """
+        在特定题材内进行风格比对
+
+        Args:
+            user_image_path: 用户照片路径
+            target_genre: 题材过滤（landscape/documentary/portrait等）
+
+        Returns:
+            同题材内的匹配结果
+        """
+        all_results = self.compare(user_image_path, top_k=20)
+        filtered = [r for r in all_results if r["genre"] == target_genre]
+        return filtered[:5]
+
+    def _get_genre(self, master_id: str) -> str:
+        """获取大师的题材分类"""
+        genre_map = {
+            "ansel_adams": "landscape",
+            "frans_lanting": "landscape",
+            "charlie_waite": "landscape",
+            "carleton_watkins": "landscape",
+            "bresson": "documentary",
+            "lange": "documentary",
+            "mccurry": "documentary",
+            "salgado": "documentary",
+            "smith": "documentary",
+            "evans": "documentary",
+        }
+        return genre_map.get(master_id, "other")
+
+
+# ============================================================
+# 风格比对Agent（供dispatch_script调用）
+# ============================================================
+class StyleMatchAgent:
+    """风格对标Agent"""
+
+    def __init__(self, master_library_path: str = "master_style_vectors.json"):
+        self.library = MasterStyleLibrary(master_library_path)
+
+    def analyze(self, image_path: str, subject_type: str) -> Dict:
+        """
+        完整的风格分析
+
+        Args:
+            image_path: 照片路径
+            subject_type: 题材类型
+
+        Returns:
+            风格分析结果
+        """
+        # 1. CLIP向量比对
+        clip_results = self.library.compare(image_path, top_k=5)
+
+        # 2. 转换为匹配度百分比
+        match_results = []
+        for r in clip_results:
+            # CLIP余弦相似度通常在0.2-0.8之间
+            # 映射到0-100%的匹配度
+            score_pct = max(0, min(100, (r["similarity"] - 0.2) / 0.6 * 100))
+            match_results.append({
+                "master_name": r["master_name"],
+                "master_id": r["master_id"],
+                "match_score": round(score_pct, 1),
+                "clip_similarity": r["similarity"],
+                "match_level": self._get_match_level(score_pct),
+            })
+
+        # 3. 检测混合风格
+        mixed_style = None
+        if len(match_results) >= 2:
+            gap = match_results[0]["match_score"] - match_results[1]["match_score"]
+            if gap < 10:
+                mixed_style = {
+                    "primary": match_results[0]["master_name"],
+                    "secondary": match_results[1]["master_name"],
+                    "ratio": f"{match_results[0]['match_score']:.0f}:"
+                            f"{match_results[1]['match_score']:.0f}",
+                }
+
+        # 4. 生成风格发展建议
+        suggestions = self._generate_suggestions(match_results, subject_type)
+
+        return {
+            "matches": match_results,
+            "mixed_style": mixed_style,
+            "suggestions": suggestions,
+        }
+
+    def quick_match(self, image_path: str) -> Dict:
+        """快速风格匹配（仅返回Top-1）"""
+        clip_results = self.library.compare(image_path, top_k=1)
+        if clip_results:
+            r = clip_results[0]
+            score_pct = max(0, min(100, (r["similarity"] - 0.2) / 0.6 * 100))
+            return {
+                "master_name": r["master_name"],
+                "match_score": round(score_pct, 1),
+                "match_level": self._get_match_level(score_pct),
+            }
+        return {"master_name": "未知", "match_score": 0, "match_level": "无匹配"}
+
+    def _get_match_level(self, score: float) -> str:
+        """根据匹配度返回等级描述"""
+        if score >= 80:
+            return "高度匹配"
+        elif score >= 60:
+            return "中度匹配"
+        elif score >= 40:
+            return "低度匹配"
+        else:
+            return "风格差异较大"
+
+    def _generate_suggestions(self, match_results: List[Dict],
+                               subject_type: str) -> List[str]:
+        """生成风格发展建议"""
+        suggestions = []
+
+        if not match_results:
+            suggestions.append("未找到匹配的大师风格")
+            suggestions.append("你的风格可能比较独特，继续探索！")
+            return suggestions
+
+        top_match = match_results[0]
+        master_name = top_match["master_name"]
+        score = top_match["match_score"]
+
+        if score >= 80:
+            suggestions.append(
+                f"你的风格已非常接近{master_name}的成熟水平"
+            )
+            suggestions.append(
+                "建议：研究该大师的非典型作品，拓展风格边界"
+            )
+        elif score >= 60:
+            suggestions.append(
+                f"你的作品有{master_name}的影子，还有发展空间"
+            )
+            suggestions.append(
+                f"建议：深入研究{master_name}的标志性技法"
+            )
+        elif score >= 40:
+            suggestions.append(
+                f"你的作品有与{master_name}相似的某些元素"
+            )
+            suggestions.append(
+                "建议：有意识地练习该大师的弱项维度"
+            )
+        else:
+            suggestions.append(
+                "你的风格比较独特，不完全匹配已有大师风格"
+            )
+            suggestions.append(
+                "这是好事——你在形成个人风格"
+            )
+
+        return suggestions
+
+
+# ============================================================
+# 独立测试
+# ============================================================
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="大师风格比对")
+    parser.add_argument("--image", required=True, help="照片路径")
+    parser.add_argument("--build", action="store_true",
+                        help="构建大师向量库")
+    parser.add_argument("--works-dir", default="reference/master_works",
+                        help="大师作品目录")
+    parser.add_argument("--top-k", type=int, default=5,
+                        help="返回匹配数量")
+
+    args = parser.parse_args()
+
+    agent = StyleMatchAgent()
+
+    if args.build:
+        agent.library.build_master_library(args.works_dir)
+    else:
+        result = agent.analyze(args.image, "auto")
+        print("\n=== 风格比对结果 ===")
+        for i, m in enumerate(result["matches"]):
+            print(f"  {i+1}. {m['master_name']} - "
+                  f"匹配度{m['match_score']}% ({m['match_level']})")
+        if result.get("mixed_style"):
+            ms = result["mixed_style"]
+            print(f"\n  混合风格：{ms['primary']} + {ms['secondary']} "
+                  f"({ms['ratio']})")
+        print("\n建议：")
+        for s in result["suggestions"]:
+            print(f"  - {s}")

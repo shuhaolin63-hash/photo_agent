@@ -1,0 +1,725 @@
+# PDF生成脚本（Python伪代码）
+
+"""
+文件名：pdf_render_script.txt
+用途：使用ReportLab生成摄影诊断PDF报告
+说明：将所有Agent的分析结果渲染为格式化的PDF报告
+"""
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm, cm
+from reportlab.lib.colors import HexColor, white, black
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Image,
+    Table, TableStyle, PageBreak, KeepTogether
+)
+from reportlab.pdfgen import canvas
+from typing import Dict, List, Optional
+import os
+from datetime import datetime
+
+# ============================================================
+# 配色方案
+# ============================================================
+COLORS = {
+    "primary_dark": HexColor("#2C2C2C"),     # 主色：深灰
+    "accent_gold": HexColor("#C8A96E"),       # 强调色：暖金
+    "text_body": HexColor("#333333"),         # 正文：深灰
+    "text_light": HexColor("#888888"),        # 辅助文字：灰色
+    "bg_light": HexColor("#F5F5F5"),         # 浅背景
+    "border": HexColor("#DDDDDD"),            # 边框
+    "red": HexColor("#CC3333"),               # 问题-严重
+    "orange": HexColor("#CC8833"),            # 问题-中等
+    "yellow": HexColor("#CCAA33"),            # 问题-轻微
+    "green": HexColor("#33AA55"),             # 良好
+}
+
+# ============================================================
+# 样式定义
+# ============================================================
+def create_styles():
+    """创建PDF文档样式"""
+    styles = getSampleStyleSheet()
+
+    styles.add(ParagraphStyle(
+        name='CoverTitle',
+        fontName='SimHei',
+        fontSize=28,
+        textColor=COLORS["primary_dark"],
+        alignment=TA_CENTER,
+        spaceAfter=8*mm,
+    ))
+
+    styles.add(ParagraphStyle(
+        name='CoverSubtitle',
+        fontName='SimHei',
+        fontSize=12,
+        textColor=COLORS["text_light"],
+        alignment=TA_CENTER,
+        spaceAfter=5*mm,
+    ))
+
+    styles.add(ParagraphStyle(
+        name='SectionTitle',
+        fontName='SimHei',
+        fontSize=16,
+        textColor=COLORS["primary_dark"],
+        spaceBefore=8*mm,
+        spaceAfter=4*mm,
+        borderColor=COLORS["accent_gold"],
+        borderWidth=2,
+        borderPadding=2*mm,
+    ))
+
+    styles.add(ParagraphStyle(
+        name='SubSectionTitle',
+        fontName='SimHei',
+        fontSize=12,
+        textColor=COLORS["primary_dark"],
+        spaceBefore=5*mm,
+        spaceAfter=2*mm,
+    ))
+
+    styles.add(ParagraphStyle(
+        name='BodyText_CN',
+        fontName='SimSun',
+        fontSize=10,
+        textColor=COLORS["text_body"],
+        leading=16,
+        alignment=TA_JUSTIFY,
+        spaceAfter=3*mm,
+    ))
+
+    styles.add(ParagraphStyle(
+        name='ScoreText',
+        fontName='SimHei',
+        fontSize=24,
+        textColor=COLORS["accent_gold"],
+        alignment=TA_CENTER,
+    ))
+
+    styles.add(ParagraphStyle(
+        name='ProblemText',
+        fontName='SimSun',
+        fontSize=9,
+        textColor=COLORS["text_body"],
+        leading=14,
+        spaceAfter=2*mm,
+    ))
+
+    return styles
+
+
+# ============================================================
+# PDF报告生成器
+# ============================================================
+class PhotoReportGenerator:
+    """摄影诊断PDF报告生成器"""
+
+    def __init__(self, output_dir: str = "output"):
+        self.output_dir = output_dir
+        self.styles = create_styles()
+
+    # --------------------------------------------------------
+    # 主生成入口
+    # --------------------------------------------------------
+    def generate(self, image_path: str, analysis_results: Dict,
+                 subject_type: str) -> str:
+        """
+        生成完整的PDF诊断报告
+
+        Args:
+            image_path: 用户照片路径
+            analysis_results: 所有Agent的分析结果汇总
+            subject_type: 题材类型
+
+        Returns:
+            生成的PDF文件路径
+        """
+        # 生成文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"photo_report_{timestamp}.pdf"
+        output_path = os.path.join(self.output_dir, filename)
+
+        # 创建PDF文档
+        doc = SimpleDocTemplate(
+            output_path,
+            pagesize=A4,
+            leftMargin=20*mm,
+            rightMargin=20*mm,
+            topMargin=25*mm,
+            bottomMargin=25*mm,
+        )
+
+        # 构建PDF内容
+        story = []
+
+        # === 封面 ===
+        story.extend(self._build_cover(image_path))
+
+        # === 目录页 ===
+        story.append(PageBreak())
+        story.extend(self._build_toc())
+
+        # === 第一章：原图分析 ===
+        story.append(PageBreak())
+        story.extend(self._build_original_analysis(
+            image_path, analysis_results
+        ))
+
+        # === 第二章：构图分析 ===
+        story.append(PageBreak())
+        story.extend(self._build_composition_section(
+            analysis_results.get("composition", {})
+        ))
+
+        # === 第三章：大师对标 ===
+        story.append(PageBreak())
+        story.extend(self._build_style_match_section(
+            analysis_results.get("style_match", {})
+        ))
+
+        # === 第四章：修图教程 ===
+        story.append(PageBreak())
+        story.extend(self._build_retouch_section(
+            analysis_results.get("retouch", {})
+        ))
+
+        # === 第五章：总结 ===
+        story.append(PageBreak())
+        story.extend(self._build_summary_section(
+            analysis_results.get("summary", {}),
+            analysis_results,
+        ))
+
+        # 生成PDF
+        doc.build(story)
+        return output_path
+
+    # --------------------------------------------------------
+    # 封面
+    # --------------------------------------------------------
+    def _build_cover(self, image_path: str) -> List:
+        """构建封面页"""
+        elements = []
+
+        elements.append(Spacer(1, 40*mm))
+        elements.append(Paragraph(
+            "摄影诊断报告",
+            self.styles["CoverTitle"]
+        ))
+        elements.append(Paragraph(
+            "PHOTOGRAPHY DIAGNOSIS REPORT",
+            self.styles["CoverSubtitle"]
+        ))
+
+        # 原图缩略图（居中）
+        if os.path.exists(image_path):
+            img = Image(image_path, width=120*mm, height=80*mm)
+            img.hAlign = 'CENTER'
+            elements.append(Spacer(1, 10*mm))
+            elements.append(img)
+
+        # 报告信息
+        elements.append(Spacer(1, 15*mm))
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        info_text = f"""
+            报告编号：PD-{datetime.now().strftime('%Y%m%d')}-001<br/>
+            生成日期：{timestamp}<br/>
+            分析引擎：Photo Agent
+        """
+        elements.append(Paragraph(
+            info_text,
+            self.styles["CoverSubtitle"]
+        ))
+
+        return elements
+
+    # --------------------------------------------------------
+    # 目录
+    # --------------------------------------------------------
+    def _build_toc(self) -> List:
+        """构建目录页"""
+        elements = []
+        elements.append(Paragraph("目录", self.styles["SectionTitle"]))
+        elements.append(Spacer(1, 5*mm))
+
+        toc_items = [
+            "一、原图分析",
+            "二、构图分析",
+            "三、大师风格对标",
+            "四、修图教程",
+            "五、综合总结",
+        ]
+
+        for item in toc_items:
+            elements.append(Paragraph(
+                item,
+                self.styles["BodyText_CN"]
+            ))
+
+        return elements
+
+    # --------------------------------------------------------
+    # 第一章：原图分析
+    # --------------------------------------------------------
+    def _build_original_analysis(self, image_path: str,
+                                  results: Dict) -> List:
+        """构建原图分析章节"""
+        elements = []
+        elements.append(Paragraph(
+            "一、原图分析",
+            self.styles["SectionTitle"]
+        ))
+
+        # 1.1 原图展示
+        elements.append(Paragraph("1.1 原图", self.styles["SubSectionTitle"]))
+        if os.path.exists(image_path):
+            img = Image(image_path, width=150*mm, height=100*mm)
+            img.hAlign = 'CENTER'
+            elements.append(img)
+
+        file_size = os.path.getsize(image_path) / (1024 * 1024)
+        elements.append(Paragraph(
+            f"文件：{os.path.basename(image_path)} | "
+            f"大小：{file_size:.1f} MB",
+            self.styles["ProblemText"]
+        ))
+
+        # 1.2 EXIF信息
+        specialist = results.get("specialist", {})
+        if "exif" in specialist:
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(
+                "1.2 拍摄参数",
+                self.styles["SubSectionTitle"]
+            ))
+            # EXIF表格
+            exif = specialist["exif"]
+            table_data = []
+            for key, value in exif.items():
+                table_data.append([
+                    Paragraph(str(key), self.styles["ProblemText"]),
+                    Paragraph(str(value), self.styles["ProblemText"]),
+                ])
+
+            if table_data:
+                table = Table(table_data, colWidths=[40*mm, 100*mm])
+                table.setStyle(TableStyle([
+                    ('GRID', (0, 0), (-1, -1), 0.5, COLORS["border"]),
+                    ('BACKGROUND', (0, 0), (0, -1), COLORS["bg_light"]),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('TOPPADDING', (0, 0), (-1, -1), 3),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ]))
+                elements.append(table)
+
+        return elements
+
+    # --------------------------------------------------------
+    # 第二章：构图分析
+    # --------------------------------------------------------
+    def _build_composition_section(self, comp_results: Dict) -> List:
+        """构建构图分析章节"""
+        elements = []
+        elements.append(Paragraph(
+            "二、构图分析",
+            self.styles["SectionTitle"]
+        ))
+
+        if not comp_results:
+            elements.append(Paragraph(
+                "构图分析数据不可用",
+                self.styles["BodyText_CN"]
+            ))
+            return elements
+
+        # 2.1 九宫格分析
+        elements.append(Paragraph(
+            "2.1 三分法分析",
+            self.styles["SubSectionTitle"]
+        ))
+        rot = comp_results.get("rule_of_thirds", {})
+        elements.append(Paragraph(
+            f"三分法匹配度：{rot.get('match_score', 'N/A')} "
+            f"（满分1.0）",
+            self.styles["BodyText_CN"]
+        ))
+        near = rot.get("subject_near_points", [])
+        if near:
+            elements.append(Paragraph(
+                f"主体靠近的交叉点：{', '.join(map(str, near))}",
+                self.styles["BodyText_CN"]
+            ))
+
+        # 2.2 水平线
+        elements.append(Paragraph(
+            "2.2 水平线分析",
+            self.styles["SubSectionTitle"]
+        ))
+        horizon = comp_results.get("horizon", {})
+        if horizon.get("detected"):
+            elements.append(Paragraph(
+                f"水平线检测：已检测到 | "
+                f"倾斜角度：{horizon.get('angle', 0):.1f}度 | "
+                f"位置：{horizon.get('position_label', 'N/A')}",
+                self.styles["BodyText_CN"]
+            ))
+            if horizon.get("needs_correction"):
+                elements.append(Paragraph(
+                    f"<font color='red'>需要校正："
+                    f"旋转{horizon.get('correction_angle', 0):.1f}度</font>",
+                    self.styles["BodyText_CN"]
+                ))
+        else:
+            elements.append(Paragraph(
+                "未检测到明显的水平线",
+                self.styles["BodyText_CN"]
+            ))
+
+        # 2.3 引导线
+        elements.append(Paragraph(
+            "2.3 引导线分析",
+            self.styles["SubSectionTitle"]
+        ))
+        lines = comp_results.get("leading_lines", {})
+        if lines.get("detected"):
+            elements.append(Paragraph(
+                f"检测到 {lines.get('line_count', 0)} 条引导线，"
+                f"类型：{', '.join(lines.get('types', []))}",
+                self.styles["BodyText_CN"]
+            ))
+        else:
+            elements.append(Paragraph(
+                "未检测到明显的引导线",
+                self.styles["BodyText_CN"]
+            ))
+
+        # 2.4 构图评分
+        elements.append(Spacer(1, 5*mm))
+        elements.append(Paragraph("2.4 构图评分", self.styles["SubSectionTitle"]))
+        score = comp_results.get("score", "N/A")
+        elements.append(Paragraph(
+            f"<font size='18' color='{COLORS['accent_gold'].hexval()}'>"
+            f"{score}</font> / 100",
+            self.styles["ScoreText"]
+        ))
+
+        # 2.5 建议
+        suggestions = comp_results.get("suggestions", [])
+        if suggestions:
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(
+                "2.5 构图改进建议", self.styles["SubSectionTitle"]
+            ))
+            for s in suggestions:
+                elements.append(Paragraph(
+                    f"• {s}",
+                    self.styles["BodyText_CN"]
+                ))
+
+        return elements
+
+    # --------------------------------------------------------
+    # 第三章：大师风格对标
+    # --------------------------------------------------------
+    def _build_style_match_section(self, style_results: Dict) -> List:
+        """构建大师对标章节"""
+        elements = []
+        elements.append(Paragraph(
+            "三、大师风格对标",
+            self.styles["SectionTitle"]
+        ))
+
+        matches = style_results.get("matches", [])
+        if not matches:
+            elements.append(Paragraph(
+                "风格匹配数据不可用",
+                self.styles["BodyText_CN"]
+            ))
+            return elements
+
+        # 3.1 匹配结果
+        elements.append(Paragraph(
+            "3.1 风格匹配结果",
+            self.styles["SubSectionTitle"]
+        ))
+
+        table_data = [["排名", "大师", "匹配度", "匹配等级"]]
+        for i, m in enumerate(matches):
+            table_data.append([
+                str(i + 1),
+                m["master_name"],
+                f"{m['match_score']}%",
+                m["match_level"],
+            ])
+
+        table = Table(table_data, colWidths=[15*mm, 40*mm, 25*mm, 40*mm])
+        table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, COLORS["border"]),
+            ('BACKGROUND', (0, 0), (-1, 0), COLORS["primary_dark"]),
+            ('TEXTCOLOR', (0, 0), (-1, 0), white),
+            ('FONTNAME', (0, 0), (-1, 0), 'SimHei'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ALIGN', (2, 0), (2, -1), 'CENTER'),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(table)
+
+        # 3.2 混合风格
+        mixed = style_results.get("mixed_style")
+        if mixed:
+            elements.append(Spacer(1, 3*mm))
+            elements.append(Paragraph(
+                "3.2 混合风格检测",
+                self.styles["SubSectionTitle"]
+            ))
+            elements.append(Paragraph(
+                f"你的作品融合了{mixed['primary']}和"
+                f"{mixed['secondary']}的风格元素<br/>"
+                f"风格比例：{mixed['ratio']}",
+                self.styles["BodyText_CN"]
+            ))
+
+        # 3.3 发展建议
+        suggestions = style_results.get("suggestions", [])
+        if suggestions:
+            elements.append(Spacer(1, 3*mm))
+            elements.append(Paragraph(
+                "3.3 风格发展建议",
+                self.styles["SubSectionTitle"]
+            ))
+            for s in suggestions:
+                elements.append(Paragraph(f"• {s}", self.styles["BodyText_CN"]))
+
+        return elements
+
+    # --------------------------------------------------------
+    # 第四章：修图教程
+    # --------------------------------------------------------
+    def _build_retouch_section(self, retouch_results: Dict) -> List:
+        """构建修图教程章节"""
+        elements = []
+        elements.append(Paragraph(
+            "四、修图教程",
+            self.styles["SectionTitle"]
+        ))
+
+        # 4.1 问题列表
+        problems = retouch_results.get("problems", [])
+        if problems:
+            elements.append(Paragraph(
+                "4.1 诊断问题", self.styles["SubSectionTitle"]
+            ))
+
+            severity_color = {
+                "high": COLORS["red"],
+                "medium": COLORS["orange"],
+                "low": COLORS["yellow"],
+            }
+            severity_label = {
+                "high": "严重",
+                "medium": "中等",
+                "low": "轻微",
+            }
+
+            for p in problems:
+                color = severity_color.get(p["severity"], COLORS["text_body"])
+                elements.append(Paragraph(
+                    f"<font color='{color.hexval()}'>"
+                    f"[{severity_label.get(p['severity'], '')}] "
+                    f"{p['name']}: {p['detail']}</font>",
+                    self.styles["ProblemText"]
+                ))
+
+        # 4.2 修图步骤
+        steps = retouch_results.get("steps", [])
+        if steps:
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(
+                "4.2 修图步骤", self.styles["SubSectionTitle"]
+            ))
+
+            for step in steps:
+                elements.append(Paragraph(
+                    f"<b>步骤{step['order']}：{step['title']}</b>",
+                    self.styles["BodyText_CN"]
+                ))
+                elements.append(Paragraph(
+                    f"工具：{step['tool']}<br/>"
+                    f"参数：{step['params']}<br/>"
+                    f"说明：{step['note']}",
+                    self.styles["ProblemText"]
+                ))
+
+        # 4.3 Lightroom参数汇总
+        lr = retouch_results.get("retouch_params", {}).get("lightroom", {})
+        if lr:
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(
+                "4.3 Lightroom参数汇总",
+                self.styles["SubSectionTitle"]
+            ))
+
+            table_data = [["参数", "值"]]
+            for k, v in lr.items():
+                table_data.append([k, str(v)])
+
+            table = Table(table_data, colWidths=[50*mm, 80*mm])
+            table.setStyle(TableStyle([
+                ('GRID', (0, 0), (-1, -1), 0.5, COLORS["border"]),
+                ('BACKGROUND', (0, 0), (-1, 0), COLORS["bg_light"]),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(table)
+
+        # 4.4 醒图参数汇总
+        xt = retouch_results.get("retouch_params", {}).get("xingtuparams", {})
+        if xt:
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(
+                "4.4 醒图参数汇总",
+                self.styles["SubSectionTitle"]
+            ))
+
+            table_data = [["参数", "值"]]
+            for k, v in xt.items():
+                table_data.append([k, str(v)])
+
+            table = Table(table_data, colWidths=[50*mm, 80*mm])
+            table.setStyle(TableStyle([
+                ('GRID', (0, 0), (-1, -1), 0.5, COLORS["border"]),
+                ('BACKGROUND', (0, 0), (-1, 0), COLORS["bg_light"]),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(table)
+
+        # 4.5 预估效果
+        expected = retouch_results.get("expected_result", {})
+        if expected:
+            elements.append(Spacer(1, 5*mm))
+            elements.append(Paragraph(
+                f"预估效果：{expected.get('improvement', 'N/A')}<br/>"
+                f"修图难度：{expected.get('difficulty', 'N/A')}",
+                self.styles["BodyText_CN"]
+            ))
+
+        return elements
+
+    # --------------------------------------------------------
+    # 第五章：综合总结
+    # --------------------------------------------------------
+    def _build_summary_section(self, summary: Dict,
+                                all_results: Dict) -> List:
+        """构建综合总结章节"""
+        elements = []
+        elements.append(Paragraph(
+            "五、综合总结",
+            self.styles["SectionTitle"]
+        ))
+
+        # 5.1 综合评分
+        score = summary.get("overall_score", 0)
+        elements.append(Paragraph(
+            "5.1 综合评分",
+            self.styles["SubSectionTitle"]
+        ))
+        elements.append(Paragraph(
+            f"<font size='24' color='{COLORS['accent_gold'].hexval()}'>"
+            f"{score:.1f}</font> / 100",
+            self.styles["ScoreText"]
+        ))
+
+        # 5.2 优势
+        strengths = summary.get("strengths", [])
+        if strengths:
+            elements.append(Paragraph(
+                "5.2 优势",
+                self.styles["SubSectionTitle"]
+            ))
+            for s in strengths[:5]:
+                elements.append(Paragraph(
+                    f"<font color='green'>✓</font> {s}",
+                    self.styles["BodyText_CN"]
+                ))
+
+        # 5.3 不足
+        weaknesses = summary.get("weaknesses", [])
+        if weaknesses:
+            elements.append(Paragraph(
+                "5.3 不足",
+                self.styles["SubSectionTitle"]
+            ))
+            for w in weaknesses[:5]:
+                elements.append(Paragraph(
+                    f"<font color='orange'>△</font> {w}",
+                    self.styles["BodyText_CN"]
+                ))
+
+        # 5.4 改进优先级
+        priorities = summary.get("top_priorities", [])
+        if priorities:
+            elements.append(Paragraph(
+                "5.4 改进优先级",
+                self.styles["SubSectionTitle"]
+            ))
+            for i, p in enumerate(priorities[:5]):
+                elements.append(Paragraph(
+                    f"{i+1}. {p.get('description', p.get('name', ''))}",
+                    self.styles["BodyText_CN"]
+                ))
+
+        # 5.5 学习建议
+        retouch = all_results.get("retouch", {})
+        style = all_results.get("style_match", {})
+        suggestions = style.get("suggestions", [])
+
+        if suggestions:
+            elements.append(Paragraph(
+                "5.5 学习建议",
+                self.styles["SubSectionTitle"]
+            ))
+            for s in suggestions[:5]:
+                elements.append(Paragraph(
+                    f"• {s}",
+                    self.styles["BodyText_CN"]
+                ))
+
+        return elements
+
+
+# ============================================================
+# 主程序入口
+# ============================================================
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="PDF报告生成")
+    parser.add_argument("--image", required=True, help="照片路径")
+    parser.add_argument("--results", required=True,
+                        help="分析结果JSON文件路径")
+    parser.add_argument("--subject", default="landscape", help="题材类型")
+    parser.add_argument("--output", default="output", help="输出目录")
+
+    args = parser.parse_args()
+
+    # 加载分析结果
+    with open(args.results, "r", encoding="utf-8") as f:
+        analysis_results = json.load(f)
+
+    # 生成PDF
+    generator = PhotoReportGenerator(output_dir=args.output)
+    pdf_path = generator.generate(
+        image_path=args.image,
+        analysis_results=analysis_results,
+        subject_type=args.subject,
+    )
+    print(f"PDF报告已生成：{pdf_path}")

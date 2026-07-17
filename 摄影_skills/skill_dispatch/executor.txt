@@ -1,0 +1,677 @@
+================================================================================
+  摄影诊断AI Agent系统 - 执行器说明 (Executor Specification)
+  版本：1.0.0 | 最后更新：2026-07-13
+================================================================================
+
+本文档定义了系统中每个Agent的输入/输出规范、Prompt模板格式、
+结果校验规则以及错误重试机制。所有Agent必须严格遵循本规范。
+
+================================================================================
+
+一、输入规范（Input Specification）
+================================================================================
+
+1.1 通用输入结构
+--------------------------------------------------------------------------------
+
+所有Agent接收的输入数据遵循统一的JSON结构：
+
+{
+  "task_id": "string",                    // 任务唯一标识（UUID v4）
+  "parent_task_id": "string | null",       // 父任务ID（用于任务链追踪）
+  "agent_id": "string",                    // 目标Agent标识
+  "timestamp": "ISO8601 datetime",        // 任务创建时间
+  "image": {
+    "path": "string",                     // 图像文件路径（绝对路径）
+    "format": "string",                   // 图像格式（jpg/png/webp/heic/tiff）
+    "size_bytes": "integer",              // 文件大小（字节）
+    "width": "integer",                   // 图像宽度（像素）
+    "height": "integer",                  // 图像高度（像素）
+    "orientation": "string",              // 朝向（1=正常/3=旋转180/6=旋转90/8=旋转270）
+    "color_space": "string",              // 色彩空间（sRGB/AdobeRGB/ProPhotoRGB）
+    "bit_depth": "integer"               // 位深度（8/16）
+  },
+  "exif": {                                // EXIF元数据（可能为null）
+    "camera_make": "string",
+    "camera_model": "string",
+    "lens_model": "string",
+    "focal_length": "float",              // 焦距（mm）
+    "focal_length_35mm": "float",         // 等效35mm焦距
+    "aperture": "float",                 // 光圈值
+    "shutter_speed": "string",           // 快门速度（如"1/250"）
+    "iso": "integer",                    // ISO感光度
+    "exposure_compensation": "float",    // 曝光补偿（EV）
+    "metering_mode": "string",           // 测光模式
+    "white_balance": "string",           // 白平衡模式
+    "flash": "boolean",                  // 是否使用闪光灯
+    "date_taken": "ISO8601 datetime",    // 拍摄时间
+    "gps": {                             // GPS信息（可能为null）
+      "latitude": "float",
+      "longitude": "float",
+      "altitude": "float"
+    }
+  },
+  "user_request": "string",              // 用户原始请求文本
+  "context": {                            // 上下文信息（由前置Agent传递）
+    "scene_classification": {             // Step1输出（仅Step2+可用）
+      "scene_id": "string",
+      "scene_name": "string",
+      "confidence": "float",
+      "sub_tags": ["string"],
+      "classification_method": "string"
+    },
+    "diagnosis_result": {},               // Step2输出（仅Step4可用）
+    "style_benchmark": {},                 // Step3输出（仅Step4可用）
+    "opencv_metrics": {}                  // OpenCV量化指标
+  }
+}
+
+1.2 各Agent特定输入要求
+--------------------------------------------------------------------------------
+
+【main_agent】
+  必需字段：image, user_request
+  可选字段：exif
+  特殊说明：
+    - 接收用户的原始上传，负责初始化任务链
+    - 若用户指定了诊断模式（如"只做构图分析"），需在context中标记mode字段
+
+【portrait_agent / landscape_agent / documentary_agent / starry_agent / still_life_agent】
+  必需字段：image, context.scene_classification, user_request
+  可选字段：exif, opencv_metrics
+  特殊说明：
+    - 必须在Step1完成后才能执行
+    - 场景分类结果必须与Agent类型匹配，否则拒绝执行
+
+【style_agent】
+  必需字段：image, context.scene_classification
+  可选字段：exif, opencv_metrics
+  特殊说明：
+    - 需要从大师风格数据库中检索匹配作品
+    - 若场景库中无对应大师数据，返回空结果而非错误
+
+【retouch_agent】
+  必需字段：image, context.scene_classification, context.diagnosis_result
+  可选字段：context.style_benchmark, exif, opencv_metrics
+  特殊说明：
+    - 必须在Step2完成后才能执行
+    - Step3的对标结果为可选增强输入
+    - 修图方案必须包含具体的参数值，不能仅提供笼统描述
+
+【pdf_export_agent】
+  必需字段：image, context.diagnosis_result, context.style_benchmark,
+            context.retouch_advice
+  可选字段：exif, opencv_metrics
+  特殊说明：
+    - 必须在Step2+Step3+Step4完成后才能执行
+    - 接收所有诊断结果的汇总数据
+
+
+================================================================================
+
+二、输出规范（Output Specification）
+================================================================================
+
+2.1 通用输出结构
+--------------------------------------------------------------------------------
+
+所有Agent返回的输出数据遵循统一的JSON结构：
+
+{
+  "task_id": "string",                    // 对应输入的task_id
+  "agent_id": "string",                    // 执行Agent标识
+  "status": "string",                     // 状态码（COMPLETED / FAILED / PARTIAL）
+  "timestamp": "ISO8601 datetime",        // 任务完成时间
+  "duration_ms": "integer",               // 执行耗时（毫秒）
+  "result": {                              // Agent特定输出（见下文）
+    // ... 各Agent自定义输出字段
+  },
+  "metadata": {
+    "model_used": "string",               // 使用的LLM模型名称
+    "tokens_input": "integer",            // 输入token数
+    "tokens_output": "integer",           // 输出token数
+    "retry_count": "integer",            // 重试次数
+    "fallback_used": "boolean"            // 是否使用了备用模型
+  },
+  "errors": ["string"]                    // 错误信息列表（无错误则为空数组）
+}
+
+2.2 各Agent特定输出格式
+--------------------------------------------------------------------------------
+
+【main_agent 输出 - 场景分类结果】
+
+{
+  "scene_classification": {
+    "scene_id": "portrait | landscape | documentary | starry | still_life | unknown",
+    "scene_name": "string",                // 中文场景名称
+    "confidence": "float",                 // 置信度 0.0-1.0
+    "sub_tags": ["string"],                // 子场景标签数组
+    "classification_method": "clip | keyword | gpt4v | fallback",
+    "clip_scores": {                        // CLIP各场景相似度得分
+      "portrait": "float",
+      "landscape": "float",
+      "documentary": "float",
+      "starry": "float",
+      "still_life": "float"
+    },
+    "next_agent": "string"                  // 分配的下一级Agent ID
+  }
+}
+
+--------------------------------------------------------------------------------
+
+【场景诊断Agent输出 - portrait/landscape/documentary/starry/still_life】
+
+{
+  "diagnosis": {
+    // ---- 构图分析 ----
+    "composition": {
+      "overall_score": "integer",           // 构图综合评分 0-100
+      "rule_of_thirds": {
+        "score": "integer",
+        "subject_alignment": "string",      // 主体对齐位置描述
+        "intersection_usage": "float",       // 三分线交叉点利用率 0-1
+        "deviation": "string"                // 偏差描述
+      },
+      "golden_ratio": {
+        "score": "integer",
+        "spiral_alignment": "float",       // 黄金螺旋对齐度 0-1
+        "description": "string"
+      },
+      "leading_lines": {
+        "detected": "boolean",
+        "lines": [{"direction": "string", "strength": "float"}],
+        "score": "integer"
+      },
+      "symmetry": {
+        "score": "integer",
+        "type": "string | null",           // 水平/垂直/旋转/无
+        "symmetry_ratio": "float"
+      },
+      "visual_center": {
+        "x": "float",                       // 视觉重心X坐标（归一化0-1）
+        "y": "float",                       // 视觉重心Y坐标（归一化0-1）
+        "weight_balance": "string"          // 平衡评估
+      },
+      "negative_space": {
+        "ratio": "float",                   // 留白占比 0-1
+        "score": "integer"
+      },
+      "summary": "string"                   // 构图综合评语（LLM生成）
+    },
+
+    // ---- 光影分析 ----
+    "lighting": {
+      "overall_score": "integer",
+      "exposure": {
+        "score": "integer",
+        "brightness_mean": "float",         // 平均亮度 0-255
+        "brightness_std": "float",          // 亮度标准差
+        "exposure_bias": "string",          // "正常" / "略过曝" / "过曝" / "略欠曝" / "欠曝"
+        "histogram": {
+          "highlights_clipped_pct": "float", // 高光溢出占比 0-1
+          "shadows_clipped_pct": "float",   // 阴影死黑占比 0-1
+          "distribution": "string"          // 直方图分布描述
+        }
+      },
+      "light_quality": {
+        "score": "integer",
+        "type": "string",                   // 自然光/人造光/混合光
+        "direction": "string",              // 正面/侧面/逆光/顶光/底光
+        "quality": "string",                 // 硬光/柔光/散射光
+        "golden_hour": "boolean"             // 是否黄金时段光线
+      },
+      "dynamic_range": {
+        "score": "integer",
+        "utilization": "float",             // 动态范围利用率 0-1
+        "evaluation": "string"
+      },
+      "summary": "string"
+    },
+
+    // ---- 色彩分析 ----
+    "color": {
+      "overall_score": "integer",
+      "temperature": {
+        "estimated_kelvin": "integer",       // 估算色温值
+        "bias": "string",                   // "偏暖" / "偏冷" / "中性"
+        "evaluation": "string"
+      },
+      "dominant_colors": [
+        {"color": "string", "hex": "string", "percentage": "float"}
+      ],
+      "saturation": {
+        "overall": "float",                 // 整体饱和度 0-1
+        "distribution": "string",           // 分布描述
+        "score": "integer"
+      },
+      "harmony": {
+        "type": "string",                   // 互补色/相邻色/三色/单色
+        "score": "integer",
+        "evaluation": "string"
+      },
+      "skin_tone_accuracy": {               // 仅人像场景
+        "applicable": "boolean",
+        "score": "integer",
+        "hue_deviation": "float",
+        "evaluation": "string"
+      },
+      "summary": "string"
+    },
+
+    // ---- 清晰度分析 ----
+    "sharpness": {
+      "overall_score": "integer",
+      "laplacian_variance": "float",
+      "focus_accuracy": {
+        "score": "integer",
+        "sharpest_region": "string",
+        "evaluation": "string"
+      },
+      "noise": {
+        "estimated_iso_noise": "float",
+        "snr": "float",
+        "evaluation": "string"
+      },
+      "motion_blur": {
+        "detected": "boolean",
+        "severity": "string",               // "无" / "轻微" / "明显" / "严重"
+        "direction": "string | null"
+      },
+      "summary": "string"
+    },
+
+    // ---- 综合诊断 ----
+    "overall_assessment": {
+      "weighted_score": "integer",          // 加权综合评分
+      "strengths": ["string"],              // 优势列表
+      "weaknesses": ["string"],             // 不足列表
+      "priority_improvements": [           // 优先改进建议（按重要性排序）
+        {"area": "string", "suggestion": "string", "priority": 1-5}
+      ]
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+
+【style_agent 输出 - 风格对标结果】
+
+{
+  "style_benchmark": {
+    "matched_masters": [
+      {
+        "name": "string",                   // 大师姓名
+        "name_en": "string",               // 英文名
+        "specialty": "string",             // 擅长领域
+        "similarity_score": "float",        // 风格相似度 0-1
+        "representative_work": "string",    // 代表作品描述
+        "style_characteristics": ["string"] // 风格特征标签
+      }
+    ],
+    "dimension_comparison": {
+      "lighting": {
+        "user_score": "integer",            // 用户照片评分 0-100
+        "master_score": "integer",          // 大师标准分 0-100
+        "gap": "integer",                   // 差距值
+        "analysis": "string"               // 差距分析
+      },
+      "composition": {
+        "user_score": "integer",
+        "master_score": "integer",
+        "gap": "integer",
+        "analysis": "string"
+      },
+      "color": {
+        "user_score": "integer",
+        "master_score": "integer",
+        "gap": "integer",
+        "analysis": "string"
+      },
+      "narrative": {
+        "user_score": "integer",
+        "master_score": "integer",
+        "gap": "integer",
+        "analysis": "string"
+      },
+      "post_processing": {
+        "user_score": "integer",
+        "master_score": "integer",
+        "gap": "integer",
+        "analysis": "string"
+      }
+    },
+    "improvement_path": [
+      {
+        "dimension": "string",              // 需改进的维度
+        "current_level": "string",          // 当前水平描述
+        "target_level": "string",           // 目标水平描述
+        "action_items": ["string"],          // 具体行动项
+        "estimated_effort": "string"         // 预估努力程度（低/中/高）
+      }
+    ],
+    "radar_chart_data": {
+      "user": {"lighting": 0-100, "composition": 0-100, "color": 0-100,
+               "narrative": 0-100, "post_processing": 0-100},
+      "master": {"lighting": 0-100, "composition": 0-100, "color": 0-100,
+                 "narrative": 0-100, "post_processing": 0-100}
+    },
+    "summary": "string"
+  }
+}
+
+--------------------------------------------------------------------------------
+
+【retouch_agent 输出 - 修图建议方案】
+
+{
+  "retouch_advice": {
+    "scene_type": "string",
+    "recommended_tool": "string",          // 推荐后期软件
+
+    // ---- 全局调整参数 ----
+    "global_adjustments": {
+      "exposure": {
+        "current": "float",                 // 当前值（基于EXIF或估算）
+        "recommended": "float",             // 推荐调整值
+        "unit": "EV",
+        "reason": "string"
+      },
+      "contrast": {
+        "current": "float",
+        "recommended": "float",
+        "range": "-100 to 100",
+        "reason": "string"
+      },
+      "highlights": {
+        "recommended": "integer",
+        "range": "-100 to 100",
+        "reason": "string"
+      },
+      "shadows": {
+        "recommended": "integer",
+        "range": "-100 to 100",
+        "reason": "string"
+      },
+      "white_balance": {
+        "current_kelvin": "integer",
+        "recommended_kelvin": "integer",
+        "tint_adjustment": "float",
+        "reason": "string"
+      },
+      "clarity": {
+        "recommended": "integer",
+        "range": "-100 to 100",
+        "reason": "string"
+      },
+      "vibrance": {
+        "recommended": "integer",
+        "range": "-100 to 100",
+        "reason": "string"
+      },
+      "saturation": {
+        "recommended": "integer",
+        "range": "-100 to 100",
+        "reason": "string"
+      }
+    },
+
+    // ---- 局部精修方案 ----
+    "local_adjustments": [
+      {
+        "region": "string",                 // 调整区域描述
+        "tool": "string",                   // 使用工具（渐变滤镜/径向滤镜/画笔/蒙版）
+        "params": {"key": "value"},          // 具体参数
+        "reason": "string"
+      }
+    ],
+
+    // ---- 推荐预设 ----
+    "recommended_presets": [
+      {
+        "name": "string",
+        "source": "string",                 // VSCO / Lightroom内置 / 自定义
+        "match_reason": "string",           // 推荐理由
+        "adjustments_needed": ["string"]    // 应用预设后仍需的微调
+      }
+    ],
+
+    // ---- 后期工作流 ----
+    "workflow": [
+      {
+        "step": 1,
+        "action": "string",                 // 步骤操作描述
+        "tool": "string",                   // 使用工具
+        "params": {"key": "value"},
+        "tips": "string"                    // 操作提示
+      }
+    ],
+
+    // ---- 色调曲线调整 ----
+    "tone_curve": {
+      "points": [{"input": "float", "output": "float"}],
+      "description": "string"
+    },
+
+    // ---- HSL调整 ----
+    "hsl_adjustments": [
+      {
+        "color": "string",                 // 色相名称（红色/橙色/黄色/...）
+        "hue": "integer",
+        "saturation": "integer",
+        "luminance": "integer",
+        "reason": "string"
+      }
+    ],
+
+    "summary": "string"
+  }
+}
+
+--------------------------------------------------------------------------------
+
+【pdf_export_agent 输出 - PDF报告】
+
+{
+  "report": {
+    "output_path": "string",                // PDF文件绝对路径
+    "page_count": "integer",                // 总页数
+    "file_size_bytes": "integer",          // 文件大小
+    "cover_included": "boolean",
+    "toc_included": "boolean",
+    "sections": [
+      {
+        "title": "string",
+        "page_range": [1, 3],
+        "charts_included": ["string"],     // 包含的图表类型
+        "images_included": "integer"       // 包含的图片数量
+      }
+    ],
+    "watermark": "boolean",
+    "generation_time_ms": "integer"
+  }
+}
+
+
+================================================================================
+
+三、Prompt模板格式
+================================================================================
+
+3.1 场景诊断Agent Prompt模板
+--------------------------------------------------------------------------------
+
+系统 prompt:
+  你是一位专业的{scene_name}摄影诊断专家。请对以下照片进行全面的技术诊断，
+  从构图、光影、色彩、清晰度四个维度进行专业评估。
+
+  诊断要求：
+  1. 构图分析：评估三分法合规度、黄金分割位置、引导线、视觉重心、对称性、留白比例
+  2. 光影分析：评估曝光准确性、高光/阴影控制、光线质量与方向、动态范围利用
+  3. 色彩分析：评估色温准确性、色彩饱和度、色彩和谐度{skin_tone_prompt}
+  4. 清晰度分析：评估对焦准确性、锐度水平、噪点控制、运动模糊
+
+  输入数据：
+  - 场景分类：{scene_name}（置信度：{confidence}）
+  - 子场景标签：{sub_tags}
+  - 相机参数：{camera_info}
+  - OpenCV量化指标：{opencv_metrics}
+
+  请严格按照JSON格式输出诊断结果。
+
+用户 prompt:
+  请对这张{scene_name}照片进行专业诊断。
+  用户原始请求：{user_request}
+
+3.2 风格对标Agent Prompt模板
+--------------------------------------------------------------------------------
+
+系统 prompt:
+  你是一位深谙摄影史和大师风格的美学分析专家。请将以下{scene_name}照片
+  与该品类的大师作品进行风格维度的系统对比。
+
+  对标大师候选池：
+  {master_list}
+
+  分析维度（每项0-100分）：
+  1. 用光风格 - 光质/光位/光比是否与大师作品匹配
+  2. 构图模式 - 构图法/打破规则程度对比
+  3. 色调倾向 - 色温/饱和度/对比度对比
+  4. 叙事强度 - 情感传达/故事性/氛围感对比
+  5. 后期风格 - 后期处理风格（自然/胶片/数码）对比
+
+  请先从候选池中选出最相似的3位大师，然后进行5维度量化对比，
+  最后生成差距分析和改进路径。
+
+用户 prompt:
+  这张{scene_name}照片的风格最接近哪位大师？请进行风格对标分析。
+
+3.3 修图建议Agent Prompt模板
+--------------------------------------------------------------------------------
+
+系统 prompt:
+  你是一位专业的摄影后期处理专家，精通Adobe Lightroom Classic、
+  Photoshop CC、Capture One Pro等主流后期软件。
+
+  基于以下诊断结果，为这张{scene_name}照片生成专业的修图方案：
+
+  诊断结论摘要：
+  {diagnosis_summary}
+
+  风格对标结果：
+  {style_benchmark_summary}
+
+  修图方案要求：
+  1. 全局调整：提供具体的参数值（曝光、对比度、高光、阴影、白平衡、清晰度等）
+  2. 局部精修：标注需要局部调整的区域和具体方案
+  3. 预设推荐：推荐适合的VSCO/Lightroom预设
+  4. 工作流：列出完整的后期处理步骤
+  5. 所有参数必须给出具体数值，不允许笼统描述
+
+  推荐使用工具：{recommended_tool}
+
+用户 prompt:
+  根据诊断结果，请给出这张{scene_name}照片的修图方案。
+
+3.4 PDF导出Agent Prompt模板
+--------------------------------------------------------------------------------
+
+系统 prompt:
+  你是一位专业的排版与报告生成专家。请将以下诊断结果整理为结构化的PDF报告。
+
+  报告模板：{template_name}
+  报告章节：
+  {section_list}
+
+  报告要求：
+  1. 封面包含系统标识、报告标题、诊断日期、照片缩略图
+  2. 每章内容完整，图表与文字配合
+  3. 评分采用统一的0-100分制
+  4. 修图参数以表格形式呈现
+  5. 总页数控制在8-15页
+  6. 使用中文撰写，专业术语附英文对照
+
+
+================================================================================
+
+四、结果校验规则
+================================================================================
+
+4.1 数据完整性校验
+
+  校验项                      校验规则                          失败处理
+  ------------------------    -----------------------------     ------------------
+  必需字段缺失                检查result中所有必需字段是否存在     补充默认值并标记PARTIAL
+  评分范围                    所有score字段必须在0-100之间         钳位到0-100
+  百分比值                    所有percentage/pct字段在0-1之间     钳位到0-1
+  置信度值                    confidence字段在0-1之间             钳位到0-1
+  颜色值                      hex颜色值符合#RRGGBB格式            忽略无效值
+  列表非空                    matched_masters至少1项              返回空列表（允许）
+  路径有效                    output_path指向的文件存在           重新生成
+
+4.2 逻辑一致性校验
+
+  校验项                      校验规则                          失败处理
+  ------------------------    -----------------------------     ------------------
+  综合评分一致性              weighted_score应与各维度评分合理相关  以各维度加权重新计算
+  场景匹配一致性              diagnosis的场景类型与分类结果一致    以分类结果为准修正
+  修图参数合理性              推荐参数值在工具允许的范围内         标记为警告
+  对标维度完整性              5个维度均有user_score和master_score 补充缺失维度
+  雷达图数据一致性            radar_chart_data与dimension一致     以dimension数据为准
+
+4.3 质量校验
+
+  校验项                      校验规则                          失败处理
+  ------------------------    -----------------------------     ------------------
+  LLM输出可解析性            JSON格式正确，可被解析              重试生成
+  评语专业性                  summary字段不含明显的模板化痕迹      标记为低质量
+  修图参数具体性              修图方案中参数值全部为具体数值       返回参数补充请求
+  评分区分度                  各维度评分不应全部相同或过于接近     重新评估差异
+
+
+================================================================================
+
+五、错误重试机制
+================================================================================
+
+5.1 重试策略总览
+
+  级别    条件                      行为                      最大次数
+  ----    ----------------------    ----------------------     ----------
+  R0      网络瞬时错误             立即重试                   1次
+  R1      API超时/500错误          指数退避重试              3次
+  R2      R1耗尽                  切换备用LLM模型            1次
+  R3      R2失败                  进入降级模式              0次
+
+5.2 指数退避时间表
+
+  重试次数    等待时间    策略说明
+  --------    --------    ----------------------------------------
+  第1次       2秒        初始等待
+  第2次       4秒        翻倍等待
+  第3次       8秒        再次翻倍
+  超限后      -          切换备用模型或进入降级模式
+
+5.3 降级模式详细规则
+
+  降级级别    触发条件                      降级行为
+  --------    --------------------------    ----------------------------------------
+  Level 1     LLM API不可用                 CLIP+OpenCV本地分析，无语义评语
+  Level 2     Level 1 + CLIP不可用          纯关键词匹配分类 + OpenCV基础分析
+  Level 3     Level 2 + OpenCV异常          返回图像基础信息 + "系统暂时不可用"
+  Level 4     完全失败                      返回错误报告，建议稍后重试
+
+5.4 各Agent降级行为对照表
+
+  Agent                Level 1降级                     Level 2降级
+  ----------------     ---------------------------      -------------------------
+  main_agent           GPT-4o Vision分类                纯关键词匹配
+  场景诊断Agent        跳过LLM评语，仅输出OpenCV数据     跳过所有分析，输出基础信息
+  style_agent          返回大师列表（无维度对比）        返回"对标服务暂不可用"
+  retouch_agent        输出通用修图参数                  输出"修图服务暂不可用"
+  pdf_export_agent     输出Markdown纯文本                输出"报告生成暂不可用"
+
+================================================================================
+  文件结束 - 执行器说明 v1.0.0
+================================================================================

@@ -1,0 +1,660 @@
+# 修图分析脚本（Python伪代码）
+
+"""
+文件名：retouch_analysis_script.txt
+用途：修图分析模块 - 检测照片问题并生成修图建议
+说明：分析照片的曝光、构图、色彩、锐度等问题，生成个性化修图参数
+"""
+
+import cv2
+import numpy as np
+from PIL import Image, ExifTags
+from typing import Dict, List, Optional
+import json
+
+# ============================================================
+# 修图分析器类
+# ============================================================
+class RetouchAnalyzer:
+    """照片修图分析器"""
+
+    def __init__(self, suggest_lib_path: str = "retouch_suggest_lib"):
+        self.suggest_lib_path = suggest_lib_path
+
+    # --------------------------------------------------------
+    # 主分析入口
+    # --------------------------------------------------------
+    def analyze(self, image_path: str, subject_type: str,
+                exif_data: Optional[Dict] = None) -> Dict:
+        """
+        分析照片并生成修图建议
+
+        Args:
+            image_path: 照片路径
+            subject_type: 题材类型
+            exif_data: EXIF数据（可选，会自动提取）
+
+        Returns:
+            修图分析结果和修图参数建议
+        """
+        # 1. 读取图像
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"error": "无法读取图像"}
+
+        h, w = img.shape[:2]
+
+        # 2. EXIF提取
+        if exif_data is None:
+            exif_data = self._extract_exif(image_path)
+
+        # 3. 问题诊断
+        problems = self._diagnose_problems(img, exif_data)
+
+        # 4. 生成修图参数
+        retouch_params = self._generate_retouch_params(
+            img, problems, subject_type, exif_data
+        )
+
+        # 5. 生成修图步骤序列
+        steps = self._generate_steps(retouch_params, problems)
+
+        # 6. 生成前后对比预估
+        expected_result = self._estimate_result(
+            problems, retouch_params
+        )
+
+        return {
+            "problems": problems,
+            "retouch_params": retouch_params,
+            "steps": steps,
+            "expected_result": expected_result,
+            "subject_type": subject_type,
+        }
+
+    # --------------------------------------------------------
+    # 问题诊断
+    # --------------------------------------------------------
+    def _diagnose_problems(self, img: np.ndarray,
+                            exif_data: Dict) -> List[Dict]:
+        """
+        诊断照片中的所有问题
+
+        Returns:
+            问题列表，按严重程度排序
+        """
+        problems = []
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        h, w = img.shape[:2]
+
+        # === 曝光问题 ===
+        problems.extend(self._check_exposure(gray, h, w))
+
+        # === 构图问题 ===
+        problems.extend(self._check_composition(img, gray, h, w))
+
+        # === 色彩问题 ===
+        problems.extend(self._check_color(img, h, w))
+
+        # === 对焦/锐度问题 ===
+        problems.extend(self._check_focus(img, gray, h, w))
+
+        # 按严重程度排序
+        severity_order = {"high": 0, "medium": 1, "low": 2}
+        problems.sort(key=lambda p: severity_order.get(p["severity"], 3))
+
+        return problems
+
+    # --------------------------------------------------------
+    # 曝光检查
+    # --------------------------------------------------------
+    def _check_exposure(self, gray: np.ndarray,
+                        h: int, w: int) -> List[Dict]:
+        """检查曝光问题"""
+        problems = []
+
+        # 计算直方图
+        hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
+        hist_norm = hist / hist.sum()
+
+        # 过曝检测：高光区域（>240）占比 > 5%
+        highlight_ratio = hist_norm[240:].sum()
+        if highlight_ratio > 0.05:
+            problems.append({
+                "code": "EXP-001",
+                "name": "过曝",
+                "severity": "high",
+                "detail": f"高光溢出占比{highlight_ratio*100:.1f}%",
+                "value": highlight_ratio,
+            })
+
+        # 欠曝检测：暗部区域（<15）占比 > 30%
+        shadow_ratio = hist_norm[:15].sum()
+        if shadow_ratio > 0.30:
+            problems.append({
+                "code": "EXP-002",
+                "name": "欠曝",
+                "severity": "high",
+                "detail": f"暗部裁切占比{shadow_ratio*100:.1f}%",
+                "value": shadow_ratio,
+            })
+
+        # 高光溢出检测（更严格的阈值 >250）
+        clipped_highlights = hist_norm[250:].sum()
+        if clipped_highlights > 0.02:
+            problems.append({
+                "code": "EXP-003",
+                "name": "高光溢出",
+                "severity": "medium",
+                "detail": f"高光严重溢出占比{clipped_highlights*100:.1f}%",
+                "value": clipped_highlights,
+            })
+
+        # 暗部缺失（<5）
+        clipped_shadows = hist_norm[:5].sum()
+        if clipped_shadows > 0.15:
+            problems.append({
+                "code": "EXP-004",
+                "name": "暗部缺失",
+                "severity": "medium",
+                "detail": f"暗部严重裁切占比{clipped_shadows*100:.1f}%",
+                "value": clipped_shadows,
+            })
+
+        # 曝光偏差估算
+        peak = np.argmax(hist)
+        exposure_bias = (peak - 128) / 128 * 3  # 映射到-3~+3 EV
+        if abs(exposure_bias) > 1.0:
+            problems.append({
+                "code": "EXP-005",
+                "name": "曝光偏差",
+                "severity": "low" if abs(exposure_bias) < 2.0 else "medium",
+                "detail": f"估算偏差{exposure_bias:+.1f}EV",
+                "value": exposure_bias,
+            })
+
+        return problems
+
+    # --------------------------------------------------------
+    # 构图检查
+    # --------------------------------------------------------
+    def _check_composition(self, img: np.ndarray,
+                            gray: np.ndarray,
+                            h: int, w: int) -> List[Dict]:
+        """检查构图问题"""
+        problems = []
+
+        # 水平线检测
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100,
+                                  minLineLength=w*0.3, maxLineGap=20)
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = np.arctan2(y2-y1, x2-x1) * 180 / np.pi
+                if abs(angle) > 1.0 and abs(angle) < 5:
+                    problems.append({
+                        "code": "CMP-001",
+                        "name": "水平线倾斜",
+                        "severity": "medium",
+                        "detail": f"倾斜{angle:.1f}度",
+                        "value": angle,
+                    })
+                    break  # 只报告一次
+
+        return problems
+
+    # --------------------------------------------------------
+    # 色彩检查
+    # --------------------------------------------------------
+    def _check_color(self, img: np.ndarray,
+                     h: int, w: int) -> List[Dict]:
+        """检查色彩问题"""
+        problems = []
+
+        # 转换为LAB色彩空间进行色温估算
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+
+        # 色温偏色检测（基于a/b通道均值）
+        mean_a = np.mean(a)
+        mean_b = np.mean(b)
+
+        if mean_b > 10:
+            problems.append({
+                "code": "CLR-001",
+                "name": "白平衡偏暖",
+                "severity": "low",
+                "detail": f"色温偏高（B通道均值={mean_b:.1f}）",
+                "value": mean_b,
+            })
+        elif mean_b < -10:
+            problems.append({
+                "code": "CLR-001",
+                "name": "白平衡偏冷",
+                "severity": "low",
+                "detail": f"色温偏低（B通道均值={mean_b:.1f}）",
+                "value": mean_b,
+            })
+
+        # 全局饱和度检查
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mean_saturation = np.mean(hsv[:, :, 1]) / 255
+
+        if mean_saturation < 0.15:
+            problems.append({
+                "code": "CLR-003",
+                "name": "色彩不饱和",
+                "severity": "low",
+                "detail": f"平均饱和度{mean_saturation:.2f}",
+                "value": mean_saturation,
+            })
+        elif mean_saturation > 0.65:
+            problems.append({
+                "code": "CLR-002",
+                "name": "色彩过饱和",
+                "severity": "low",
+                "detail": f"平均饱和度{mean_saturation:.2f}",
+                "value": mean_saturation,
+            })
+
+        # 噪点检测（基于拉普拉斯高频分量）
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        noise_level = self._estimate_noise(gray)
+        if noise_level > 20:
+            problems.append({
+                "code": "CLR-007",
+                "name": "噪点明显",
+                "severity": "medium",
+                "detail": f"估计噪点水平{noise_level:.1f}",
+                "value": noise_level,
+            })
+
+        return problems
+
+    # --------------------------------------------------------
+    # 对焦/锐度检查
+    # --------------------------------------------------------
+    def _check_focus(self, img: np.ndarray,
+                     gray: np.ndarray,
+                     h: int, w: int) -> List[Dict]:
+        """检查对焦和锐度问题"""
+        problems = []
+
+        # 全局清晰度（拉普拉斯方差）
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        if laplacian_var < 100:
+            problems.append({
+                "code": "FOC-001",
+                "name": "对焦模糊",
+                "severity": "high",
+                "detail": f"清晰度指标{laplacian_var:.0f}（阈值100）",
+                "value": laplacian_var,
+            })
+        elif laplacian_var < 300:
+            problems.append({
+                "code": "FOC-006",
+                "name": "轻微模糊",
+                "severity": "medium",
+                "detail": f"清晰度指标{laplacian_var:.0f}，可能手抖",
+                "value": laplacian_var,
+            })
+
+        return problems
+
+    # --------------------------------------------------------
+    # 噪点估算
+    # --------------------------------------------------------
+    def _estimate_noise(self, gray: np.ndarray) -> float:
+        """估算图像噪点水平"""
+        # 使用拉普拉斯高通滤波 + 标准差
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        # 高斯平滑后的差异 = 噪点
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        noise = gray.astype(float) - blurred.astype(float)
+        return np.std(noise)
+
+    # --------------------------------------------------------
+    # 生成修图参数
+    # --------------------------------------------------------
+    def _generate_retouch_params(self, img: np.ndarray,
+                                 problems: List[Dict],
+                                 subject_type: str,
+                                 exif_data: Dict) -> Dict:
+        """
+        根据诊断问题生成修图参数
+
+        Returns:
+            {
+                "lightroom": {参数字典},
+                "xingtuparams": {参数字典},
+                "priority_fixes": [修复优先级列表]
+            }
+        """
+        lr_params = {}
+        xt_params = {}
+
+        # 初始基础参数（根据题材）
+        base_params = self._get_base_params(subject_type)
+        lr_params.update(base_params["lightroom"])
+        xt_params.update(base_params["xingtuparams"])
+
+        # 根据问题调整参数
+        adjustments = {
+            "EXP-001": {"exposure": -0.5, "highlights": -60, "whites": -30,
+                        "光感": -15, "高光": -30},
+            "EXP-002": {"exposure": 0.5, "shadows": 50, "blacks": 20,
+                        "光感": 15, "阴影": 30},
+            "EXP-003": {"highlights": -70, "whites": -40,
+                        "高光": -40},
+            "EXP-004": {"shadows": 70, "blacks": 30,
+                        "阴影": 40},
+            "EXP-005": {"exposure": None,  # 根据偏差值动态计算
+                        "光感": None},
+            "CLR-001": {"temperature": None,  # 根据偏色方向动态计算
+                        "色温": None},
+            "CLR-002": {"saturation": -15, "vibrance": -10,
+                        "饱和度": -10},
+            "CLR-003": {"saturation": 10, "vibrance": 15,
+                        "饱和度": 8, "鲜明度": 10},
+            "CLR-007": {"luminance_noise": 40,  # 根据噪点水平动态调整
+                        "降噪": 30},
+            "FOC-001": {"sharpening_amount": 80, "sharpening_radius": 1.5,
+                        "锐化": 40},
+            "FOC-006": {"sharpening_amount": 60,
+                        "锐化": 30},
+            "CMP-001": {"transform_rotation": None},  # 根据倾斜角度动态计算
+        }
+
+        # 应用调整
+        for problem in problems:
+            code = problem["code"]
+            value = problem.get("value")
+
+            if code in adjustments:
+                for key, default_val in adjustments[code].items():
+                    if default_val is None and value is not None:
+                        # 动态计算参数值
+                        dynamic_val = self._calculate_dynamic_param(
+                            code, key, value
+                        )
+                        if dynamic_val is not None:
+                            if key in lr_params or key in self._lr_param_keys():
+                                lr_params[key] = dynamic_val
+                            if key in xt_params or key in self._xt_param_keys():
+                                xt_params[key] = dynamic_val
+                    elif default_val is not None:
+                        if key in self._lr_param_keys():
+                            lr_params[key] = default_val
+                        if key in self._xt_param_keys():
+                            xt_params[key] = default_val
+
+        return {
+            "lightroom": lr_params,
+            "xingtuparams": xt_params,
+            "priority_fixes": [
+                {"code": p["code"], "name": p["name"],
+                 "severity": p["severity"]}
+                for p in problems
+            ],
+        }
+
+    def _calculate_dynamic_param(self, code: str, key: str,
+                                  value: float) -> Optional[float]:
+        """根据问题值动态计算修图参数"""
+        if code == "EXP-005" and key == "exposure":
+            return round(-value * 0.3, 2)  # 按偏差的30%反向补偿
+        if code == "EXP-005" and key == "光感":
+            return round(-value * 0.3 * 5, 1)  # 醒图参数映射
+        if code == "CLR-001" and key == "temperature":
+            return round(-value * 3, 0)  # B通道偏差映射为色温调整
+        if code == "CLR-001" and key == "色温":
+            return round(-value * 1.5, 1)
+        if code == "CLR-007" and key == "luminance_noise":
+            return min(100, max(20, value * 3))
+        if code == "CLR-007" and key == "降噪":
+            return min(80, max(15, value * 2))
+        if code == "CMP-001" and key == "transform_rotation":
+            return round(value, 1)
+        return None
+
+    def _lr_param_keys(self):
+        """Lightroom参数名集合"""
+        return {
+            "exposure", "contrast", "highlights", "shadows",
+            "whites", "blacks", "clarity", "vibrance", "saturation",
+            "temperature", "tint", "texture", "dehaze",
+            "sharpening_amount", "sharpening_radius", "sharpening_detail",
+            "sharpening_masking", "luminance_noise", "color_noise",
+            "transform_rotation", "transform_vertical", "transform_scale",
+        }
+
+    def _xt_param_keys(self):
+        """醒图参数名集合"""
+        return {
+            "光感", "亮度", "对比度", "高光", "阴影",
+            "清晰度", "鲜明度", "饱和度",
+            "色温", "色调", "锐化", "降噪",
+        }
+
+    def _get_base_params(self, subject_type: str) -> Dict:
+        """根据题材返回基础修图参数"""
+        base_presets = {
+            "portrait": {
+                "lightroom": {
+                    "clarity": 5, "vibrance": 8, "sharpening_amount": 40,
+                },
+                "xingtuparams": {
+                    "光感": 10, "清晰度": 5, "鲜明度": 8,
+                },
+            },
+            "landscape": {
+                "lightroom": {
+                    "clarity": 15, "vibrance": 12, "dehaze": 8,
+                    "sharpening_amount": 50,
+                },
+                "xingtuparams": {
+                    "光感": 8, "清晰度": 10, "鲜明度": 10,
+                },
+            },
+            "starry": {
+                "lightroom": {
+                    "shadows": 60, "clarity": 25, "dehaze": 15,
+                    "sharpening_amount": 60, "luminance_noise": 50,
+                },
+                "xingtuparams": {
+                    "光感": 25, "阴影": 35, "清晰度": 15,
+                },
+            },
+        }
+        return base_presets.get(subject_type, base_presets["landscape"])
+
+    # --------------------------------------------------------
+    # 生成修图步骤
+    # --------------------------------------------------------
+    def _generate_steps(self, retouch_params: Dict,
+                         problems: List[Dict]) -> List[Dict]:
+        """生成修图步骤序列"""
+        steps = []
+
+        # 步骤1：基础校正
+        if any(p["code"] == "CMP-001" for p in problems):
+            steps.append({
+                "order": 1,
+                "title": "水平线校正",
+                "tool": "裁剪工具 > 水平仪",
+                "params": {
+                    "rotation": retouch_params["lightroom"].get(
+                        "transform_rotation", 0
+                    )
+                },
+                "note": "确保地平线水平",
+            })
+
+        # 步骤2：曝光与影调
+        lr = retouch_params["lightroom"]
+        exposure_steps = {}
+        for key in ["exposure", "highlights", "shadows", "whites", "blacks"]:
+            if key in lr and lr[key] != 0:
+                exposure_steps[key] = lr[key]
+        if exposure_steps:
+            steps.append({
+                "order": 2,
+                "title": "曝光与影调调整",
+                "tool": "Lightroom基础面板",
+                "params": exposure_steps,
+                "note": "先校正曝光，再调整影调细节",
+            })
+
+        # 步骤3：色彩调整
+        color_steps = {}
+        for key in ["temperature", "tint", "vibrance", "saturation"]:
+            if key in lr and lr[key] != 0:
+                color_steps[key] = lr[key]
+        if color_steps:
+            steps.append({
+                "order": 3,
+                "title": "色彩调整",
+                "tool": "Lightroom色彩面板",
+                "params": color_steps,
+                "note": "校正色温和饱和度",
+            })
+
+        # 步骤4：清晰度与去雾
+        clarity_steps = {}
+        for key in ["clarity", "dehaze"]:
+            if key in lr and abs(lr[key]) > 5:
+                clarity_steps[key] = lr[key]
+        if clarity_steps:
+            steps.append({
+                "order": 4,
+                "title": "清晰度与去雾",
+                "tool": "Lightroom基础面板",
+                "params": clarity_steps,
+                "note": "增强质感和层次",
+            })
+
+        # 步骤5：降噪与锐化
+        if "luminance_noise" in lr and lr["luminance_noise"] > 20:
+            steps.append({
+                "order": 5,
+                "title": "降噪",
+                "tool": "Lightroom降噪面板",
+                "params": {
+                    "luminance": lr["luminance_noise"],
+                    "color": 30,
+                },
+                "note": "先降噪，再锐化",
+            })
+
+        if "sharpening_amount" in lr and lr["sharpening_amount"] > 30:
+            steps.append({
+                "order": 6,
+                "title": "锐化",
+                "tool": "Lightroom锐化面板",
+                "params": {
+                    "amount": lr["sharpening_amount"],
+                    "radius": lr.get("sharpening_radius", 1.0),
+                },
+                "note": "适度锐化，避免过度",
+            })
+
+        return steps
+
+    # --------------------------------------------------------
+    # 预估修图效果
+    # --------------------------------------------------------
+    def _estimate_result(self, problems: List[Dict],
+                          retouch_params: Dict) -> Dict:
+        """预估修图后的效果"""
+        # 量化问题数量和严重程度
+        high_count = sum(1 for p in problems if p["severity"] == "high")
+        medium_count = sum(1 for p in problems if p["severity"] == "medium")
+        low_count = sum(1 for p in problems if p["severity"] == "low")
+
+        total = len(problems)
+        if total == 0:
+            return {"improvement": "照片质量良好，仅需微调", "difficulty": "简单"}
+
+        if high_count >= 2:
+            return {
+                "improvement": "修图后将有显著改善",
+                "difficulty": "较难",
+                "note": "存在多个严重问题，需要较大幅度调整",
+            }
+        elif high_count >= 1:
+            return {
+                "improvement": "修图后将有明显改善",
+                "difficulty": "中等",
+                "note": "存在严重问题，需要重点修正",
+            }
+        elif medium_count >= 2:
+            return {
+                "improvement": "修图后将有改善",
+                "difficulty": "简单-中等",
+                "note": "多个中等问题可以通过参数调整解决",
+            }
+        else:
+            return {
+                "improvement": "微调即可提升",
+                "difficulty": "简单",
+                "note": "照片整体质量较好，仅需微调优化",
+            }
+
+    # --------------------------------------------------------
+    # EXIF提取
+    # --------------------------------------------------------
+    def _extract_exif(self, image_path: str) -> Dict:
+        """提取EXIF信息"""
+        exif_data = {}
+        try:
+            img = Image.open(image_path)
+            raw_exif = img._getexif()
+            if raw_exif:
+                for tag_id, value in raw_exif.items():
+                    tag_name = ExifTags.TAGS.get(tag_id, tag_id)
+                    exif_data[str(tag_name)] = str(value)
+        except Exception:
+            pass
+        return exif_data
+
+
+# ============================================================
+# 独立测试
+# ============================================================
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="修图分析")
+    parser.add_argument("--image", required=True, help="照片路径")
+    parser.add_argument("--subject", default="landscape", help="题材类型")
+
+    args = parser.parse_args()
+
+    analyzer = RetouchAnalyzer()
+    result = analyzer.analyze(args.image, args.subject)
+
+    print("\n=== 修图分析结果 ===")
+    print(f"\n问题列表（{len(result['problems'])}个）：")
+    for p in result["problems"]:
+        severity_map = {"high": "严重", "medium": "中等", "low": "轻微"}
+        print(f"  [{severity_map[p['severity']]}] {p['name']}: {p['detail']}")
+
+    print(f"\n修图步骤（{len(result['steps'])}步）：")
+    for step in result["steps"]:
+        print(f"  步骤{step['order']}: {step['title']}")
+        print(f"    工具: {step['tool']}")
+        print(f"    参数: {step['params']}")
+        print(f"    说明: {step['note']}")
+
+    print(f"\nLightroom参数:")
+    for k, v in result["retouch_params"]["lightroom"].items():
+        print(f"  {k}: {v}")
+
+    print(f"\n醒图参数:")
+    for k, v in result["retouch_params"]["xingtuparams"].items():
+        print(f"  {k}: {v}")
+
+    print(f"\n预估效果: {result['expected_result']['improvement']}")
+    print(f"难度: {result['expected_result']['difficulty']}")

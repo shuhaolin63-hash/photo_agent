@@ -1,0 +1,369 @@
+# 任务调度脚本（Python伪代码）
+
+"""
+文件名：dispatch_script.txt
+用途：Photo Agent 主任务调度器的伪代码
+说明：接收用户照片和需求，分类分发到各专业Agent，汇总结果
+"""
+
+# ============================================================
+# 导入模块
+# ============================================================
+from typing import Dict, List, Optional
+from enum import Enum
+
+# ============================================================
+# 任务类型枚举
+# ============================================================
+class TaskType(Enum):
+    FULL_DIAGNOSIS = "full_diagnosis"       # 完整诊断（构图+风格+修图+PDF）
+    COMPOSITION_ONLY = "composition_only"     # 仅构图分析
+    STYLE_MATCH_ONLY = "style_match_only"     # 仅风格对标
+    RETOUCH_ONLY = "retouch_only"             # 仅修图建议
+    QUICK_REVIEW = "quick_review"             # 快速点评
+
+# ============================================================
+# 题材分类枚举
+# ============================================================
+class SubjectType(Enum):
+    PORTRAIT = "portrait"         # 人像
+    LANDSCAPE = "landscape"       # 风光
+    DOCUMENTARY = "documentary"   # 纪实
+    STREET = "street"             # 街拍
+    STARRY = "starry"             # 星空
+    STILL_LIFE = "still_life"     # 静物
+    FOOD = "food"                 # 美食
+    ARCHITECTURE = "architecture" # 建筑
+    SPORT = "sport"               # 体育
+    MACRO = "macro"               # 微距
+    OTHER = "other"               # 其他
+
+# ============================================================
+# 主调度器类
+# ============================================================
+class PhotoDispatchAgent:
+    """摄影诊断主调度器"""
+
+    def __init__(self):
+        self.agents = {
+            "portrait": PortraitAgent(),
+            "landscape": LandscapeAgent(),
+            "documentary": DocumentaryAgent(),
+            "starry": StarryAgent(),
+            "still_life": StillLifeAgent(),
+            "style": StyleMatchAgent(),
+            "retouch": RetouchSuggestAgent(),
+            "pdf_export": PdfExportAgent(),
+        }
+
+    # --------------------------------------------------------
+    # 主入口：处理用户请求
+    # --------------------------------------------------------
+    def process_request(self, image_path: str, task_type: TaskType,
+                        user_note: Optional[str] = None) -> Dict:
+        """
+        处理用户请求的主入口
+
+        Args:
+            image_path: 用户上传的照片路径
+            task_type: 任务类型
+            user_note: 用户附加说明（可选）
+
+        Returns:
+            包含所有Agent结果的汇总字典
+        """
+        print(f"[Dispatch] 接收任务: {task_type.value}")
+        print(f"[Dispatch] 图片: {image_path}")
+
+        # 步骤1：提取EXIF和基础信息
+        exif_data = self._extract_exif(image_path)
+        print(f"[Dispatch] EXIF提取完成")
+
+        # 步骤2：识别题材分类
+        subject_type = self._classify_subject(image_path)
+        print(f"[Dispatch] 题材分类: {subject_type.value}")
+
+        # 步骤3：根据任务类型分发到各Agent
+        results = {}
+
+        if task_type == TaskType.FULL_DIAGNOSIS:
+            results = self._full_diagnosis(image_path, subject_type, exif_data)
+
+        elif task_type == TaskType.COMPOSITION_ONLY:
+            results["composition"] = self._run_composition_analysis(
+                image_path, subject_type
+            )
+
+        elif task_type == TaskType.STYLE_MATCH_ONLY:
+            results["style_match"] = self.agents["style"].analyze(
+                image_path, subject_type
+            )
+
+        elif task_type == TaskType.RETOUCH_ONLY:
+            results["retouch"] = self._run_retouch_analysis(
+                image_path, subject_type, exif_data
+            )
+
+        elif task_type == TaskType.QUICK_REVIEW:
+            results = self._quick_review(image_path, subject_type)
+
+        # 步骤4：汇总结果
+        summary = self._summarize_results(results, subject_type)
+        results["summary"] = summary
+
+        # 步骤5：生成PDF（完整诊断时）
+        if task_type == TaskType.FULL_DIAGNOSIS:
+            pdf_path = self.agents["pdf_export"].generate(
+                image_path, results, subject_type
+            )
+            results["pdf_path"] = pdf_path
+
+        print(f"[Dispatch] 任务完成")
+        return results
+
+    # --------------------------------------------------------
+    # 完整诊断流程
+    # --------------------------------------------------------
+    def _full_diagnosis(self, image_path: str,
+                        subject_type: SubjectType,
+                        exif_data: Dict) -> Dict:
+        """执行完整的摄影诊断流程"""
+        results = {}
+
+        # 1. 题材专项诊断
+        specialist_agent = self._get_specialist_agent(subject_type)
+        results["specialist"] = specialist_agent.diagnose(
+            image_path, exif_data
+        )
+
+        # 2. 构图分析
+        results["composition"] = self._run_composition_analysis(
+            image_path, subject_type
+        )
+
+        # 3. 风格对标
+        results["style_match"] = self.agents["style"].analyze(
+            image_path, subject_type
+        )
+
+        # 4. 修图建议
+        results["retouch"] = self._run_retouch_analysis(
+            image_path, subject_type, exif_data
+        )
+
+        return results
+
+    # --------------------------------------------------------
+    # 获取题材专项Agent
+    # --------------------------------------------------------
+    def _get_specialist_agent(self, subject_type: SubjectType):
+        """根据题材类型获取对应的专项诊断Agent"""
+        mapping = {
+            SubjectType.PORTRAIT: "portrait",
+            SubjectType.LANDSCAPE: "landscape",
+            SubjectType.DOCUMENTARY: "documentary",
+            SubjectType.STREET: "documentary",
+            SubjectType.STARRY: "starry",
+            SubjectType.STILL_LIFE: "still_life",
+            SubjectType.FOOD: "still_life",
+            SubjectType.ARCHITECTURE: "still_life",
+            SubjectType.MACRO: "still_life",
+            SubjectType.OTHER: "landscape",  # 默认使用风光Agent
+        }
+        agent_key = mapping.get(subject_type, "landscape")
+        return self.agents[agent_key]
+
+    # --------------------------------------------------------
+    # 构图分析
+    # --------------------------------------------------------
+    def _run_composition_analysis(self, image_path: str,
+                                   subject_type: SubjectType) -> Dict:
+        """运行构图分析"""
+        from composition_check import CompositionAnalyzer
+
+        analyzer = CompositionAnalyzer()
+        result = analyzer.analyze(image_path, subject_type)
+        return result
+
+    # --------------------------------------------------------
+    # 修图分析
+    # --------------------------------------------------------
+    def _run_retouch_analysis(self, image_path: str,
+                               subject_type: SubjectType,
+                               exif_data: Dict) -> Dict:
+        """运行修图分析"""
+        result = self.agents["retouch"].analyze(
+            image_path, subject_type, exif_data
+        )
+        return result
+
+    # --------------------------------------------------------
+    # 快速点评
+    # --------------------------------------------------------
+    def _quick_review(self, image_path: str,
+                      subject_type: SubjectType) -> Dict:
+        """快速点评模式：只做基础分析，不做详细修图教程"""
+        results = {}
+
+        # 简化构图分析
+        results["composition_quick"] = {
+            "horizon_level": check_horizon(image_path),
+            "rule_of_thirds": check_rule_of_thirds(image_path),
+            "main_subject_position": detect_subject_position(image_path),
+        }
+
+        # 简化风格匹配
+        results["style_quick"] = self.agents["style"].quick_match(
+            image_path
+        )
+
+        return results
+
+    # --------------------------------------------------------
+    # EXIF提取
+    # --------------------------------------------------------
+    def _extract_exif(self, image_path: str) -> Dict:
+        """提取照片EXIF信息"""
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+
+        exif_data = {}
+        try:
+            img = Image.open(image_path)
+            raw_exif = img._getexif()
+            if raw_exif:
+                for tag_id, value in raw_exif.items():
+                    tag_name = TAGS.get(tag_id, tag_id)
+                    exif_data[tag_name] = value
+        except Exception as e:
+            print(f"[EXIF] 提取失败: {e}")
+
+        return exif_data
+
+    # --------------------------------------------------------
+    # 题材分类
+    # --------------------------------------------------------
+    def _classify_subject(self, image_path: str) -> SubjectType:
+        """使用CLIP模型进行题材分类"""
+        import clip
+        import torch
+        from PIL import Image
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, preprocess = clip.load("ViT-B/32", device=device)
+
+        # 题材标签
+        labels = [
+            "a portrait photograph of a person",
+            "a landscape photograph of nature",
+            "a documentary photograph",
+            "a street photography",
+            "a night sky photograph with stars",
+            "a still life photograph",
+            "a food photograph",
+            "an architectural photograph",
+            "a sports photograph",
+            "a macro photograph",
+        ]
+
+        image = preprocess(Image.open(image_path)).unsqueeze(0).to(device)
+        text = clip.tokenize(labels).to(device)
+
+        with torch.no_grad():
+            image_features = model.encode_image(image)
+            text_features = model.encode_text(text)
+            similarity = (image_features @ text_features.T).softmax(dim=-1)
+
+        best_idx = similarity.argmax().item()
+        subject_map = {
+            0: SubjectType.PORTRAIT,
+            1: SubjectType.LANDSCAPE,
+            2: SubjectType.DOCUMENTARY,
+            3: SubjectType.STREET,
+            4: SubjectType.STARRY,
+            5: SubjectType.STILL_LIFE,
+            6: SubjectType.FOOD,
+            7: SubjectType.ARCHITECTURE,
+            8: SubjectType.SPORT,
+            9: SubjectType.MACRO,
+        }
+
+        return subject_map.get(best_idx, SubjectType.OTHER)
+
+    # --------------------------------------------------------
+    # 结果汇总
+    # --------------------------------------------------------
+    def _summarize_results(self, results: Dict,
+                           subject_type: SubjectType) -> Dict:
+        """汇总所有Agent的分析结果"""
+        summary = {
+            "subject_type": subject_type.value,
+            "overall_score": 0,
+            "strengths": [],
+            "weaknesses": [],
+            "top_priorities": [],
+        }
+
+        # 收集所有评分
+        scores = []
+        for key, result in results.items():
+            if isinstance(result, dict) and "score" in result:
+                scores.append((key, result["score"]))
+
+        if scores:
+            summary["overall_score"] = sum(s[1] for s in scores) / len(scores)
+
+        # 收集优势和不足
+        for key, result in results.items():
+            if isinstance(result, dict):
+                if "strengths" in result:
+                    summary["strengths"].extend(result["strengths"])
+                if "weaknesses" in result:
+                    summary["weaknesses"].extend(result["weaknesses"])
+                if "priorities" in result:
+                    summary["top_priorities"].extend(result["priorities"])
+
+        # 按优先级排序
+        summary["top_priorities"].sort(key=lambda x: x.get("priority", 99))
+
+        return summary
+
+
+# ============================================================
+# 主程序入口
+# ============================================================
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="摄影诊断主调度器")
+    parser.add_argument("--image", required=True, help="照片路径")
+    parser.add_argument("--mode", default="full",
+                        choices=["full", "composition", "style", "retouch", "quick"],
+                        help="诊断模式")
+    parser.add_argument("--note", default=None, help="用户附加说明")
+
+    args = parser.parse_args()
+
+    task_map = {
+        "full": TaskType.FULL_DIAGNOSIS,
+        "composition": TaskType.COMPOSITION_ONLY,
+        "style": TaskType.STYLE_MATCH_ONLY,
+        "retouch": TaskType.RETOUCH_ONLY,
+        "quick": TaskType.QUICK_REVIEW,
+    }
+
+    agent = PhotoDispatchAgent()
+    results = agent.process_request(
+        image_path=args.image,
+        task_type=task_map[args.mode],
+        user_note=args.note,
+    )
+
+    # 输出结果摘要
+    print(f"\n=== 诊断结果摘要 ===")
+    print(f"题材：{results['summary']['subject_type']}")
+    print(f"综合评分：{results['summary']['overall_score']:.1f}/100")
+    print(f"优势：{results['summary']['strengths']}")
+    print(f"不足：{results['summary']['weaknesses']}")
+    if "pdf_path" in results:
+        print(f"PDF报告：{results['pdf_path']}")

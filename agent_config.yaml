@@ -1,0 +1,465 @@
+# ============================================================
+# 摄影诊断AI Agent系统 - 全局配置文件
+# 项目名称：PhotoDiag Agent
+# 版本：1.0.0
+# 最后更新：2026-07-13
+# ============================================================
+
+# -------------------- 项目元信息 --------------------
+project:
+  name: "摄影诊断AI Agent系统"
+  name_en: "PhotoDiag Agent System"
+  version: "1.0.0"
+  description: "基于多Agent协作的智能摄影诊断系统，支持人像/风光/纪实/星空/静物全品类照片的构图分析、光影诊断、色彩评估、大师风格对标及修图建议，最终生成专业PDF诊断报告。"
+  author: "PhotoDiag Team"
+  license: "MIT"
+  language: "zh-CN"
+  encoding: "UTF-8"
+
+# -------------------- 技术栈配置 --------------------
+tech_stack:
+  # ---- 大语言模型（LLM）----
+  llm:
+    primary:
+      provider: "openai"
+      model: "gpt-4o"
+      api_base: "https://api.openai.com/v1"
+      max_tokens: 4096
+      temperature: 0.7
+      timeout_seconds: 60
+      retry_count: 3
+      retry_delay_ms: 2000
+    fallback:
+      provider: "aliyun"
+      model: "qwen-max"
+      api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      max_tokens: 4096
+      temperature: 0.7
+      timeout_seconds: 60
+      retry_count: 3
+      retry_delay_ms: 2000
+    vision:
+      provider: "openai"
+      model: "gpt-4o-vision-preview"
+      image_max_size_mb: 20
+      supported_formats: ["jpg", "jpeg", "png", "webp", "heic", "tiff"]
+      detail_level: "high"  # high / low / auto
+
+  # ---- 图像理解模型（CLIP）----
+  clip:
+    provider: "openai"
+    model: "ViT-L/14@336px"
+   用途:
+      - 场景自动识别（人像/风光/纪实/星空/静物）
+      - 摄影风格标签匹配
+      - 情绪氛围分类
+      - 图像语义相似度检索
+    input_size: 336
+    embed_dim: 768
+    threshold:
+      scene_confidence: 0.75
+      style_similarity: 0.65
+
+  # ---- 图像分割模型（SAM）----
+  sam:
+    provider: "meta"
+    model: "sam2.1-hiera-large"
+    用途:
+      - 主体自动分割（人像抠图、前景提取）
+      - 遮挡区域检测
+      - 不完整构图区域定位
+    checkpoint_path: "./models/sam2.1_hiera_large.pt"
+    device: "cuda"  # cuda / cpu / mps
+    max_image_size: 2048
+    confidence_threshold: 0.85
+
+  # ---- 图像处理引擎（OpenCV）----
+  opencv:
+    version: "4.10.0"
+    功能模块:
+      - 构图分析:
+          - 三分线网格检测
+          - 黄金比例螺旋叠加
+          - 对称性检测
+          - 视觉重心计算
+      - 光影分析:
+          - 直方图统计（RGB / HSV）
+          - 高光溢出检测（>250阈值像素占比）
+          - 阴影死黑检测（<5阈值像素占比）
+          - 曝光均匀度评估
+      - 色彩分析:
+          - 色温/色调偏移检测
+          - 色彩饱和度分布
+          - 互补色/相邻色和谐度
+          - 肤色准确度评估（人像场景）
+      - 清晰度评估:
+          - Laplacian方差检测
+          - 边缘锐度评分
+          - 噪点水平估计（ISO噪声模型）
+
+# -------------------- 多Agent配置 --------------------
+agents:
+
+  # ===== 主控Agent =====
+  main_agent:
+    id: "main"
+    name: "主控调度Agent"
+    role: "全局任务编排与流程控制"
+    description: |
+      负责接收用户上传的照片和诊断请求，协调各专业Agent的调度与执行顺序，
+      汇总诊断结果，生成最终的PDF报告。
+    capabilities:
+      - 接收并解析用户请求
+      - 调用CLIP进行场景自动分类
+      - 根据分类结果调度专业Agent
+      - 管理任务队列和执行顺序
+      - 汇总多Agent诊断结果
+      - 触发PDF报告生成
+    llm: "primary"
+    max_concurrent_tasks: 5
+    timeout_seconds: 120
+    priority: 1
+
+  # ===== 人像诊断Agent =====
+  portrait_agent:
+    id: "portrait"
+    name: "人像摄影诊断Agent"
+    role: "人像照片的专业级诊断"
+    scene: ["portrait", "人像", "肖像", "证件照", "写真", "情侣照", "家庭照", "婚礼"]
+    capabilities:
+      - 面部构图评估（眼神方向、面部占比、头部角度）
+      - 光线质量诊断（伦勃朗光、蝴蝶光、环形光、分割光）
+      - 背景虚化与景深评估
+      - 肤色准确性与均匀度分析
+      - 表情与情绪捕捉评估
+      - 姿态与肢体语言诊断
+      - 道具与场景协调性分析
+    对标大师:
+      - "安妮·莱博维茨（Annie Leibovitz）- 叙事性人像"
+      - "优素福·卡什（Yousuf Karsh）- 经典肖像"
+      - "理查德·阿维顿（Richard Avedon）- 极简人像"
+      - "彼得·林德伯格（Peter Lindbergh）- 自然美"
+      - "史蒂夫·麦凯瑞（Steve McCurry）- 环境肖像"
+      - "塞西尔·比顿（Cecil Beaton）- 高级时尚人像"
+      - "阿诺德·纽曼（Arnold Newman）- 环境肖像"
+      - "何藩（Fan Ho）- 东方美学人像"
+    llm: "primary"
+    timeout_seconds: 90
+
+  # ===== 风光诊断Agent =====
+  landscape_agent:
+    id: "landscape"
+    name: "风光摄影诊断Agent"
+    role: "风光照片的专业级诊断"
+    scene: ["landscape", "风光", "风景", "山川", "海景", "日出日落", "城市风光", "建筑", "瀑布", "森林"]
+    capabilities:
+      - 前景/中景/远景层次分析
+      - 引导线与视觉流评估
+      - 天空与地面比例检测
+      - 光线时段质量评估（黄金时段/蓝调时刻/正午）
+      - 色彩层次与大气透视分析
+      - 水面倒影与对称构图检测
+      -HDR曝光合理性评估
+    对标大师:
+      - "安塞尔·亚当斯（Ansel Adams）- 区域曝光法大师"
+      - "迈克尔·肯纳（Michael Kenna）- 极简风光"
+      - "简·贝克（Jan Beck）- 湿版风光"
+      - "弗里茨·赫德尔（Fritz Henle）- 自然风光"
+      - "赵亮（Zhao Liang）- 中国风光"
+      - "李少白（Li Shaobai）- 故宫光影"
+      - "翟东风（Zhai Dongfeng）- 航拍风光"
+      - "克里斯·伯克（Chris Burkard）- 冲浪风光"
+    llm: "primary"
+    timeout_seconds: 90
+
+  # ===== 纪实诊断Agent =====
+  documentary_agent:
+    id: "documentary"
+    name: "纪实摄影诊断Agent"
+    role: "纪实/街拍/新闻照片的专业级诊断"
+    scene: ["documentary", "纪实", "街拍", "新闻", "人文", "旅行", "美食", "节庆", "民俗", "运动"]
+    capabilities:
+      - "决定性瞬间"捕捉评估
+      - 叙事性与故事张力分析
+      - 主体与环境的协调性
+      - 情感表达与人文关怀评估
+      - 画面信息密度与干扰元素检测
+      - 焦段选择与透视关系分析
+      - 黑白/彩色选择合理性
+    对标大师:
+      - "亨利·卡蒂埃-布列松（Henri Cartier-Bresson）- 决定性瞬间"
+      - "罗伯特·卡帕（Robert Capa）- 战地纪实"
+      - "多萝西娅·兰格（Dorothea Lange）- 社会纪实"
+      - "塞巴斯提奥·萨尔加多（Sebastiao Salgado）- 人文纪实"
+      - "薇薇安·迈尔（Vivian Maier）- 街拍"
+      - "亚历克斯·韦伯（Alex Webb）- 色彩街头"
+      - "刘香成（Liu Heung Shing）- 新闻纪实"
+      - "吕楠（Lu Nan）- 中国纪实"
+    llm: "primary"
+    timeout_seconds: 90
+
+  # ===== 星空诊断Agent =====
+  starry_agent:
+    id: "starry"
+    name: "星空摄影诊断Agent"
+    role: "星空/银河/星轨/极光照片的专业级诊断"
+    scene: ["starry", "星空", "银河", "星轨", "极光", "流星", "天文摄影", "夜景", "月蚀", "日蚀"]
+    capabilities:
+      - 银河核心与拱桥可见性评估
+      - 星点锐度与拖尾检测
+      - 光污染影响评估（波特尔暗空等级）
+      - 前景星空搭配协调性
+      - 堆栈/合成质量检测
+      - 色彩还原准确度（星云色彩）
+      - ISO噪声与信噪比分析
+      - 极光形态与色彩诊断
+    对标大师:
+      - "罗杰·尼恩（Roger Niven）- 银河拱桥"
+      - "叶梓颐（Ye Ziyi）- 中国星空"
+      - "阿兰·蒂耶里（Alain Tirilly）- 极光"
+      - "陈海瀚（Chen Haihan）- 星空风光"
+      - "戴建峰（Dai Jianfeng）- 天文摄影"
+      - "段鑫星（Duan Xinxing）- 星轨摄影"
+    llm: "primary"
+    timeout_seconds: 90
+
+  # ===== 静物诊断Agent =====
+  still_life_agent:
+    id: "still_life"
+    name: "静物摄影诊断Agent"
+    role: "静物/微距/美食/产品照片的专业级诊断"
+    scene: ["still_life", "静物", "微距", "美食摄影", "产品摄影", "花卉", "珠宝", "手表", "食物摆盘"]
+    capabilities:
+      - 主体清晰度与微距锐度评估
+      - 布光方案诊断（柔光/硬光/侧光/逆光）
+      - 背景选择与虚实过渡评估
+      - 色彩还原与食欲感评估（美食）
+      - 质感呈现（金属光泽/木纹/织物纹理）
+      - 透视畸变与校正建议
+      - 透视与景深控制
+    对标大师:
+      - "爱德华·韦斯顿（Edward Weston）- 经典静物"
+      - "欧文·佩恩（Irving Penn）- 时尚静物"
+      - "安德烈·科特兹（Andre Kertesz）- 抽象静物"
+      - "马丁·西尔克（Martin Sirl）- 产品摄影"
+      - "罗曼·罗兰（Roman Loranc）- 花卉"
+      - "陈曼（Chen Man）- 商业产品"
+    llm: "primary"
+    timeout_seconds: 90
+
+  # ===== 风格对标Agent =====
+  style_agent:
+    id: "style"
+    name: "摄影风格对标Agent"
+    role: "将用户照片与大师作品进行风格层面的对比分析"
+    description: |
+      通过CLIP语义特征提取与LLM深度分析，将用户照片与对应品类的大师作品进行
+      风格维度对标，输出可执行的改进方向。
+    capabilities:
+      - 摄影风格语义特征提取
+      - 大师作品风格数据库检索匹配
+      - 风格维度对标（用光/构图/色彩/叙事/后期）
+      - 差距分析与改进路径生成
+      - 风格迁移建议（非AI生成，仅提供拍摄/后期指导）
+    style_dimensions:
+      - "用光风格（自然光/人造光/混合光）"
+      - "构图模式（规则/打破规则）"
+      - "色调倾向（暖调/冷调/中性）"
+      - "叙事强度（强叙事/弱叙事/纯美学）"
+      - "后期风格（胶片/数码/混合）"
+    llm: "primary"
+    timeout_seconds: 60
+
+  # ===== 修图建议Agent =====
+  retouch_agent:
+    id: "retouch"
+    name: "修图建议Agent"
+    role: "根据诊断结果生成场景化修图方案"
+    description: |
+      综合构图、光影、色彩诊断结果，针对照片的具体场景类型，
+      生成分步骤的修图建议方案，包括参数化调整建议和后期流程指导。
+    capabilities:
+      - 全局调整建议（曝光/对比/高光/阴影/白平衡）
+      - 分场景精修方案
+      - 局部调整建议（蒙版/渐变/笔刷）
+      - 预设风格推荐（VSCO/Acr预设/自定义预设）
+      - 后期工作流建议（RAW处理 → 基础调整 → 精修 → 锐化输出）
+      - 直方图修正方案
+    retouch_tools:
+      - "Adobe Lightroom Classic"
+      - "Adobe Photoshop CC"
+      - "Capture One Pro"
+      - "DxO PhotoLab"
+      - "Darktable（开源）"
+    llm: "primary"
+    timeout_seconds: 90
+
+  # ===== PDF导出Agent =====
+  pdf_export_agent:
+    id: "pdf_export"
+    name: "PDF报告生成Agent"
+    role: "将诊断结果汇总并排版为专业PDF报告"
+    description: |
+      接收所有Agent的诊断输出，按照预设模板进行结构化排版，
+      生成包含原图标注、诊断结论、对标分析、修图建议的专业PDF报告。
+    capabilities:
+      - 报告模板渲染
+      - 图像标注叠加（构图辅助线、高光/阴影区域标记）
+      - 直方图嵌入
+      - 对标大师作品对比展示
+      - 修图前后模拟对比
+      - 中英文双语标题支持
+    output:
+      format: "PDF/A-3"
+      page_size: "A4"
+      dpi: 300
+      color_space: "sRGB"
+      font:
+        cn: "Source Han Sans SC / 思源黑体"
+        en: "Helvetica Neue"
+        mono: "Source Code Pro"
+    template:
+      default: "professional"
+      alternatives: ["minimal", "academic", "magazine"]
+    llm: "primary"
+    timeout_seconds: 60
+
+# -------------------- 任务调度配置 --------------------
+dispatch:
+  # 任务流转协议
+  workflow:
+    step1_scene_classify:
+      agent: "main_agent"
+      action: "CLIP场景分类"
+      timeout: 15
+    step2_composition_diagnosis:
+      agent: "scene_agent"  # 由step1分类结果决定
+      action: "构图/光影/色彩诊断"
+      timeout: 90
+    step3_style_matching:
+      agent: "style_agent"
+      action: "大师风格对标"
+      timeout: 60
+    step4_retouch_advice:
+      agent: "retouch_agent"
+      action: "修图方案生成"
+      timeout: 90
+    step5_pdf_export:
+      agent: "pdf_export_agent"
+      action: "PDF报告生成"
+      timeout: 60
+
+  # Agent分配矩阵
+  routing_matrix:
+    portrait: "portrait_agent"
+    landscape: "landscape_agent"
+    documentary: "documentary_agent"
+    starry: "starry_agent"
+    still_life: "still_life_agent"
+    unknown: "main_agent"  # 未识别场景由主控Agent兜底
+
+  # 并行执行配置
+  parallel_groups:
+    - [step2_composition_diagnosis, step3_style_matching]  # 构图诊断与风格对标可并行
+    - [step4_retouch_advice]  # 修图建议依赖step2/3结果
+    - [step5_pdf_export]  # PDF依赖所有诊断结果
+
+# -------------------- PDF生成配置 --------------------
+pdf_config:
+  output_dir: "./output/reports"
+  filename_template: "photo_diag_{timestamp}_{scene}_{hash}.pdf"
+  template_dir: "./templates/pdf"
+  cover_page: true
+  cover_elements:
+    - "系统Logo"
+    - "报告标题"
+    - "诊断日期"
+    - "照片缩略图"
+    - "场景分类标签"
+  content_sections:
+    - order: 1
+      title: "照片概览"
+      content: ["原图展示", "EXIF信息表", "基础参数摘要"]
+    - order: 2
+      title: "构图诊断"
+      content: ["构图辅助线叠加图", "三分法/黄金分割分析", "视觉重心标注", "构图评分"]
+    - order: 3
+      title: "光影分析"
+      content: ["直方图展示", "高光/阴影区域标注", "曝光评分", "光线质量评估"]
+    - order: 4
+      title: "色彩评估"
+      content: ["色彩分布图", "色温/色调分析", "色彩和谐度评分", "肤色准确度（人像）"]
+    - order: 5
+      title: "风格对标"
+      content: ["匹配大师介绍", "风格维度雷达图", "差距分析", "对标作品参考"]
+    - order: 6
+      title: "修图建议"
+      content: ["全局调整参数", "局部精修方案", "推荐预设", "后期工作流"]
+    - order: 7
+      title: "总结与提升路径"
+      content: ["综合评分", "核心改进方向TOP3", "推荐学习资源", "练习建议"]
+  watermark: false
+  page_number: true
+  toc: true
+
+# -------------------- 数据管理配置 --------------------
+data_management:
+  # 输入文件管理
+  input:
+    upload_dir: "./input/uploads"
+    supported_formats: ["jpg", "jpeg", "png", "webp", "heic", "tiff", "raw", "cr2", "nef", "arw"]
+    max_file_size_mb: 50
+    auto_rotate: true  # 自动根据EXIF方向旋转
+    exif_extract: true  # 提取完整EXIF信息
+    thumbnail:
+      enabled: true
+      max_dimension: 800
+      quality: 85
+
+  # 中间结果管理
+  intermediate:
+    cache_dir: "./cache/intermediate"
+    ttl_hours: 24  # 临时文件保留24小时
+    auto_cleanup: true
+
+  # 大师作品数据库
+  style_database:
+    db_path: "./data/style_master_db.json"
+    embedding_path: "./data/style_embeddings/"
+    update_strategy: "manual"  # manual / auto
+    sources:
+      - "本地精选作品集"
+      - "授权图库样本"
+      - "公开领域经典作品"
+
+  # 用户历史记录
+  history:
+    db_path: "./data/user_history.db"
+    retention_days: 90
+    auto_backup: true
+    backup_dir: "./backups"
+
+  # 日志配置
+  logging:
+    level: "INFO"  # DEBUG / INFO / WARNING / ERROR
+    log_dir: "./logs"
+    log_rotation: "daily"
+    max_log_files: 30
+    format: "%(asctime)s | %(levelname)s | %(agent_id)s | %(message)s"
+
+# -------------------- 性能与安全配置 --------------------
+performance:
+  max_concurrent_agents: 3
+  request_queue_size: 100
+  rate_limit:
+    requests_per_minute: 10
+    requests_per_hour: 50
+  cache:
+    embedding_cache: true
+    analysis_cache_ttl_minutes: 30
+
+security:
+  api_key_rotation_days: 30
+  input_sanitization: true
+  pii_detection: true  # 检测并脱敏照片中的个人信息（人脸/车牌等）
+  max_requests_per_user_per_day: 20

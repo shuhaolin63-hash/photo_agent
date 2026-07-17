@@ -1,0 +1,278 @@
+# 风格特征提取规则
+
+## 一、概述
+
+本文件定义了如何从用户上传的照片中提取风格特征向量的规则。特征向量将用于后续的风格匹配和大师对标。
+
+## 二、特征向量结构
+
+风格特征向量是一个多维向量，包含以下维度：
+
+```
+style_vector = {
+    "color": {                     // 色彩特征（权重25%）
+        "dominant_hue": [...],      // 主色调HSL值列表
+        "saturation_level": 0-1,   // 整体饱和度水平
+        "warm_cool_ratio": 0-1,    // 暖色/冷色比例（>0.5偏暖）
+        "contrast_level": 0-1,    // 色彩对比度
+        "monochrome": bool,         // 是否为黑白
+        "color_harmony": "complementary|analogous|triadic|monochromatic"
+    },
+    "tone": {                      // 影调特征（权重25%）
+        "exposure_bias": -3~+3,   // 曝光偏差（EV）
+        "highlight_detail": 0-1,   // 高光细节保留度
+        "shadow_detail": 0-1,      // 暗部细节保留度
+        "contrast_type": "high|medium|low",
+        "tonal_range": "full|highlight-heavy|shadow-heavy|midtone",
+        "film_simulation": "none|kodachrome|tri-x|portra|velvia|..."
+    },
+    "composition": {                // 构图特征（权重25%）
+        "rule_of_thirds": 0-1,      // 三分法匹配度
+        "symmetry_level": 0-1,      // 对称性
+        "leading_lines": [...],    // 引导线类型列表
+        "foreground_depth": 0-1,    // 前景纵深感
+        "negative_space": 0-1,      // 留白程度（>0.5为大量留白）
+        "framing": "none|natural|geometric",
+        "horizon_position": "upper|middle|lower|none",
+        "geometric_elements": [...], // 几何元素列表
+        "aspect_ratio": "square|landscape|portrait|panorama"
+    },
+    "light": {                      // 光影特征（权重15%）
+        "direction": "front|side|back|diffused|mixed",
+        "quality": "hard|soft|mixed",
+        "golden_hour": bool,        // 是否为黄金时刻光线
+        "dramatic": bool,           // 光线是否有戏剧性
+        "light_pattern": "even|directional|chiaroscuro|spotlight|silhouette"
+    },
+    "subject": {                    // 题材特征（权重10%）
+        "primary_subject": "landscape|portrait|street|architecture|wildlife|food|macro|still_life|starry|sport|abstract",
+        "sub_category": "...",      // 细分类别
+        "mood": "serene|dramatic|intimate|epic|documentary|romantic|mysterious",
+        "cultural_context": "...",  // 文化语境
+        "human_presence": "none|individual|group|crowd"
+    }
+}
+```
+
+## 三、提取规则
+
+### 3.1 色彩特征提取
+
+#### 3.1.1 主色调分析
+```
+算法流程：
+1. 将图像缩小至256×256进行色彩采样
+2. 使用K-Means聚类（K=5）提取主要色彩区域
+3. 将RGB转换为HSL色相空间
+4. 记录每个聚类中心的HSL值和面积占比
+5. 过滤掉面积<5%的微小色块
+6. 按面积降序排列得到dominant_hue列表
+
+判断规则：
+- monochrome = true 的条件：所有像素的饱和度均值 < 15
+- warm_cool_ratio > 0.5：暖色像素（H: 0-60, 300-360）占比更大
+- warm_cool_ratio <= 0.5：冷色像素（H: 60-300）占比更大
+```
+
+#### 3.1.2 饱和度分析
+```
+1. 计算全图饱和度的均值和标准差
+2. saturation_level = mean_saturation / 255
+3. 分类：
+   - 低饱和度：saturation_level < 0.2（接近黑白）
+   - 中饱和度：0.2 <= saturation_level < 0.5（自然色彩）
+   - 高饱和度：saturation_level >= 0.5（浓烈色彩）
+```
+
+#### 3.1.3 色彩和谐分析
+```
+基于主色调的H值分布判断：
+- monochromatic：所有主色调H值差 < 30度
+- analogous：所有主色调H值差 < 60度
+- complementary：存在两个主色调H值差在150-210度之间
+- triadic：存在三个主色调H值近似等间隔分布
+```
+
+### 3.2 影调特征提取
+
+#### 3.2.1 直方图分析
+```
+1. 计算灰度直方图
+2. 分析直方图分布形态：
+   - highlight-heavy：高光区域（>200）像素 > 30%
+   - shadow-heavy：暗部区域（<55）像素 > 30%
+   - midtone：中间调区域像素占比最高
+   - full：高光和暗部都有充分分布
+
+3. 曝光偏差估算：
+   exposure_bias = (直方图峰值位置 - 128) / 128 * 3
+   正值=偏亮，负值=偏暗
+```
+
+#### 3.2.2 对比度分析
+```
+1. 计算图像的标准差（RMS对比度）
+2. contrast_level = std_dev / 128
+3. 分类：
+   - 低对比度：contrast_level < 0.3
+   - 中对比度：0.3 <= contrast_level < 0.5
+   - 高对比度：contrast_level >= 0.5
+```
+
+#### 3.2.3 胶片模拟检测
+```
+基于色调分布和色彩特征匹配已知胶片模拟特征：
+- Kodachrome：高饱和度+暖色调+略偏绿色阴影
+- Tri-X：黑白+高对比度+明显颗粒感
+- Portra：柔和色彩+暖色调+低对比度+自然肤色
+- Velvia：极高饱和度+偏冷色调+高对比度
+- Ilford HP5：黑白+中等对比度+细腻颗粒
+```
+
+### 3.3 构图特征提取
+
+#### 3.3.1 三分法分析
+```
+1. 在画面上绘制三分法网格线（4条线将画面分为9宫格）
+2. 检测图像中高对比度边缘和显著区域
+3. 计算显著区域与三分法交叉点的距离
+4. rule_of_thirds = 距离加权匹配度（0-1）
+5. 附加：检测主体是否位于黄金比例交叉点
+```
+
+#### 3.3.2 对称性分析
+```
+1. 将图像分为上下两半，计算像素相似度
+2. 将图像分为左右两半，计算像素相似度
+3. symmetry_level = max(垂直对称度, 水平对称度)
+```
+
+#### 3.3.3 引导线检测
+```
+使用OpenCV的霍夫变换（Hough Transform）检测直线：
+1. 转换为灰度图
+2. Canny边缘检测
+3. 霍夫线变换
+4. 过滤有效引导线（长度 > 画面对角线30%）
+5. 分类：
+   - 对角线
+   - 水平线
+   - 垂直线
+   - S形曲线（通过边缘追踪检测）
+   - 放射线（从一点向外发散的线条组）
+```
+
+#### 3.3.4 水平线检测
+```
+1. 在图像底部1/3区域检测水平线
+2. 使用霍夫变换检测接近水平的线段（角度偏差 < 5度）
+3. 如果检测到水平线，记录其Y坐标（画面中的垂直位置）
+4. horizon_position：
+   - upper：水平线在画面上1/3
+   - middle：水平线在画面中间1/3
+   - lower：水平线在画面下1/3
+   - none：未检测到明显水平线
+```
+
+#### 3.3.5 前景纵深感
+```
+1. 将图像分为近、中、远三个区域
+2. 计算每个区域的清晰度（拉普拉斯方差）
+3. 如果三个区域的清晰度有明显递减梯度，则前景深度高
+4. foreground_depth = (近景清晰度 - 远景清晰度) / 近景清晰度
+```
+
+### 3.4 光影特征提取
+
+#### 3.4.1 光线方向检测
+```
+1. 使用梯度分析检测光照方向
+2. 计算图像的Sobel梯度（水平和垂直）
+3. 统计梯度方向的主导方向
+4. 分类：
+   - front：梯度方向均匀分布（正面照明）
+   - side：梯度方向有明确偏好（侧面照明）
+   - back：高亮区域在主体边缘（逆光）
+   - diffused：梯度幅度低（漫射光）
+```
+
+#### 3.4.2 黄金时刻检测
+```
+1. 分析图像色温（WB参数或色温估算）
+2. 检测是否存在明显的暖色偏移（色温 > 5500K）
+3. 检测阴影长度和方向（辅助判断太阳角度）
+4. golden_hour = true：色温暖 + 存在长阴影
+```
+
+### 3.5 题材分类
+
+#### 3.5.1 主题材分类
+```
+使用CLIP模型进行零样本分类：
+prompt列表：
+- "a landscape photograph"
+- "a portrait photograph"
+- "a street photography"
+- "an architectural photograph"
+- "a wildlife photograph"
+- "a food photograph"
+- "a macro photograph"
+- "a still life photograph"
+- "a night sky photograph"
+- "a sports photograph"
+- "an abstract photograph"
+
+选择得分最高的分类作为primary_subject
+```
+
+#### 3.5.2 CLIP特征描述
+```
+使用CLIP的图像编码器提取512维特征向量作为风格特征的补充：
+1. 将图像调整至224×224
+2. 通过CLIP Vision Encoder提取图像嵌入向量（image embedding）
+3. 对向量进行L2归一化
+4. 存储为style_clip_vector，用于后续余弦相似度计算
+```
+
+## 四、特征向量输出格式
+
+```json
+{
+    "image_id": "unique_id",
+    "feature_vector": {
+        "color": {...},
+        "tone": {...},
+        "composition": {...},
+        "light": {...},
+        "subject": {...}
+    },
+    "clip_vector": [512 floats],
+    "timestamp": "ISO 8601"
+}
+```
+
+## 五、特征提取Pipeline
+
+```
+输入图像
+  │
+  ├─> 图像预处理（缩放、EXIF解析）
+  │
+  ├─> 色彩分析模块 ────> color特征
+  │
+  ├─> 影调分析模块 ────> tone特征
+  │
+  ├─> 构图分析模块 ────> composition特征
+  │     ├─> OpenCV边缘检测
+  │     ├─> 霍夫线变换
+  │     ├─> 显著区域检测
+  │     └─> 三分法/对称性计算
+  │
+  ├─> 光影分析模块 ────> light特征
+  │
+  ├─> CLIP编码器 ──────> clip_vector
+  │
+  ├─> 题材分类模块 ────> subject特征
+  │
+  └─> 输出风格特征向量 JSON
+```

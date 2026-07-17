@@ -1,0 +1,255 @@
+# 风格推荐逻辑
+
+## 一、概述
+
+本文件定义了根据用户照片的风格特征向量，匹配最接近的大师风格，并给出个性化风格发展建议的逻辑。
+
+## 二、大师风格特征库
+
+### 2.1 大师特征向量（预定义）
+
+每位大师在系统中有预定义的风格特征向量（基于其代表作品的分析）：
+
+```
+MASTER_PROFILES = {
+    "ansel_adams": {
+        "name_cn": "安塞尔·亚当斯",
+        "genre": "landscape",
+        "style_signature": {
+            "color": {
+                "monochrome": true,
+                "saturation_level": 0.0,
+                "warm_cool_ratio": 0.5,
+                "contrast_level": 0.75,
+                "color_harmony": "monochromatic"
+            },
+            "tone": {
+                "contrast_type": "high",
+                "tonal_range": "full",
+                "highlight_detail": 0.8,
+                "shadow_detail": 0.7,
+                "film_simulation": "tri-x"
+            },
+            "composition": {
+                "rule_of_thirds": 0.85,
+                "symmetry_level": 0.3,
+                "leading_lines": ["diagonal", "S-curve"],
+                "foreground_depth": 0.8,
+                "negative_space": 0.2,
+                "horizon_position": "lower",
+                "geometric_elements": ["triangle", "diagonal"]
+            },
+            "light": {
+                "direction": "side",
+                "quality": "hard",
+                "golden_hour": true,
+                "dramatic": true,
+                "light_pattern": "directional"
+            },
+            "subject": {
+                "primary_subject": "landscape",
+                "mood": "epic",
+                "human_presence": "none"
+            }
+        },
+        "clip_vector": [预计算512维向量]
+    },
+    // ... 其他大师类似定义
+}
+```
+
+### 2.2 大师CLIP特征向量来源
+- 从每位大师的10-20张代表作品中提取CLIP图像嵌入向量
+- 对所有代表作品的向量取平均值，得到该大师的"风格核心向量"
+- 存储在向量数据库中，支持快速相似度检索
+
+## 三、匹配算法
+
+### 3.1 两阶段匹配策略
+
+#### 阶段一：CLIP向量粗筛
+```
+1. 提取用户照片的CLIP图像嵌入向量（512维，L2归一化）
+2. 计算与所有大师向量的余弦相似度
+3. 返回Top-5候选大师列表
+4. 阈值过滤：相似度 > 0.3 才纳入候选
+```
+
+#### 阶段二：特征向量精排
+```
+1. 对Top-5候选大师进行详细特征比对
+2. 计算加权欧氏距离：
+
+   distance = Σ(weight_i × |user_feature_i - master_feature_i|)
+
+   权重分配：
+   - color: 0.25
+   - tone: 0.25
+   - composition: 0.25
+   - light: 0.15
+   - subject: 0.10
+
+3. 距离越小匹配度越高
+4. 返回Top-3匹配结果，附带匹配度百分比
+```
+
+### 3.2 匹配度计算公式
+
+```
+match_score = (1 - normalized_distance) × 100
+
+其中：
+normalized_distance = weighted_distance / max_possible_distance
+
+max_possible_distance = Σ(weight_i × feature_range_i)
+
+匹配度分级：
+- 90–100%：高度匹配（照片风格与大师非常接近）
+- 70–89%：中度匹配（有明显相似特征）
+- 50–69%：低度匹配（有部分相似元素）
+- <50%：风格差异较大（可能属于混合风格或独特风格）
+```
+
+### 3.3 混合风格检测
+
+```
+当Top-2大师的匹配度差距 < 10%时，判定为混合风格：
+
+mixed_style = {
+    "primary": "大师A",
+    "secondary": "大师B",
+    "mix_ratio": "A: B的匹配比例",
+    "description": "你的作品融合了大师A的[特征]和大师B的[特征]"
+}
+```
+
+## 四、风格发展建议生成
+
+### 4.1 基于匹配结果的建议
+
+```
+IF 匹配度 >= 80%:
+    建议 = "你的风格已非常接近{大师名}的成熟风格"
+    建议 += "下一步可以尝试：
+           1. 研究{大师名}的非典型作品，拓展风格边界
+           2. 尝试将{大师名}的技法与其他大师的构图/色彩融合
+           3. 开创个人风格变体——在{大师名}基础上加入你的独特元素"
+
+IF 60% <= 匹配度 < 80%:
+    建议 = "你的作品有{大师名}的影子，但还有发展空间"
+    建议 += "具体改进方向：
+           1. [基于差距分析的具体建议]
+           2. [针对弱项维度的练习建议]
+           3. [推荐研读的大师作品/书籍]"
+
+IF 40% <= 匹配度 < 60%:
+    建议 = "你的作品有与{大师名}相似的某些元素"
+    建议 += "你可以考虑：
+           1. 是否有意朝这个方向发展？
+           2. [针对性技法训练建议]"
+
+IF 匹配度 < 40%:
+    建议 = "你的风格比较独特，不完全匹配已有大师风格"
+    建议 += "这可能是好事——你在形成个人风格"
+    建议 += "可以从多位大师中各取所长：
+           1. [最接近的3位大师及可借鉴的方面]"
+```
+
+### 4.2 基于特征差距的具体建议
+
+```
+对每个特征维度，计算用户与匹配大师的差距：
+
+gaps = {
+    "color_saturation": {
+        "user": 0.3,
+        "master": 0.7,
+        "gap": -0.4,
+        "suggestion": "可以适当提高饱和度，参考{大师名}在{作品名}中的色彩处理"
+    },
+    "composition_negative_space": {
+        "user": 0.1,
+        "master": 0.6,
+        "gap": -0.5,
+        "suggestion": "尝试增加留白，去掉画面中不必要的元素"
+    }
+    // ...
+}
+```
+
+### 4.3 题材×风格交叉建议
+
+```
+根据用户的题材和最匹配的大师，给出交叉建议：
+
+题材×大师建议表：
+| 用户题材 | 匹配大师 | 发展方向建议 |
+|----------|----------|-------------|
+| 风光 | 亚当斯 | 深入区域曝光系统，尝试黑白 |
+| 风光 | 兰廷 | 融入生态叙事，尝试低角度 |
+| 风光 | 韦特 | 练习极简构图和ND滤镜使用 |
+| 人像 | 麦凯瑞 | 学习Kodachrome色彩，练习眼神捕捉 |
+| 人像 | 兰格 | 学习移情式拍摄方法 |
+| 纪实 | 布列松 | 练习几何构图和决定性瞬间 |
+| 纪实 | 萨尔加多 | 规划长期项目，学习高对比度黑白 |
+| 街头 | 布列松 | 用50mm镜头限制自己，提高构图精确度 |
+| 建筑 | 埃文斯 | 练习正面平视构图 |
+| 建筑 | Stoller | 学习移轴镜头使用 |
+```
+
+## 五、推荐输出格式
+
+```json
+{
+    "match_results": [
+        {
+            "rank": 1,
+            "master_name": "安塞尔·亚当斯",
+            "match_score": 78,
+            "match_level": "中度匹配",
+            "similar_features": ["黑白影调", "高对比度", "三层纵深构图"],
+            "different_features": ["缺少前景引导线", "暗部细节不足"],
+            "master_works_ref": ["Moonrise, Hernandez", "The Tetons and Snake River"]
+        },
+        // ... Top-3
+    ],
+    "mixed_style": null,
+    "development_suggestions": {
+        "short_term": "练习区域曝光系统，提高暗部细节保留",
+        "medium_term": "尝试在三张照片中使用前景引导线",
+        "long_term": "规划一个为期3个月的黑白风光专题项目",
+        "recommended_reading": "《摄影基础丛书》- Ansel Adams",
+        "recommended_exercises": [
+            "连续7天只用黑白模式拍摄",
+            "练习寻找三层纵深结构",
+            "暗房/后期中练习遮挡与减淡"
+        ]
+    },
+    "feature_gaps": {
+        "color": {"gap_description": "...", "priority": "high"},
+        "tone": {"gap_description": "...", "priority": "medium"},
+        // ...
+    }
+}
+```
+
+## 六、特殊情况处理
+
+### 6.1 多人合照
+- 当检测到多人合照时，降低"单个大师"匹配权重
+- 优先匹配布列松（街头群像）、萨尔加多（密集人群）或埃文斯
+
+### 6.2 明显修图痕迹
+- 当检测到过度磨皮、过度液化等痕迹时
+- 不进行大师匹配，转而给出修图建议（移交retouch_agent）
+- 附注："检测到明显后期处理，建议参考修图指南先调整"
+
+### 6.3 新手/技术问题照片
+- 当检测到严重的技术问题（曝光错误、对焦失败、水平线倾斜等）
+- 先进行技术问题诊断
+- 再进行风格匹配（基于"潜在风格"而非当前技术表现）
+
+### 6.4 创意图/合成图
+- 当检测到明显的合成/创意处理时
+- 标注为"创意/合成摄影"
+- 匹配Cindy Sherman（观念摄影）或Gursky（数字合成）等创意类大师

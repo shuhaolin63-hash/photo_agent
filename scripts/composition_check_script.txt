@@ -1,0 +1,688 @@
+# 构图检测脚本（Python伪代码）
+
+"""
+文件名：composition_check_script.txt
+用途：构图分析模块 - OpenCV水平线检测、九宫格分析、引导线检测
+说明：分析照片的构图要素，输出构图评价和建议
+"""
+
+import cv2
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+
+# ============================================================
+# 构图分析器类
+# ============================================================
+class CompositionAnalyzer:
+    """照片构图分析器"""
+
+    def __init__(self):
+        self.min_line_length_ratio = 0.3  # 最小有效线段长度（相对于对角线）
+
+    # --------------------------------------------------------
+    # 主分析入口
+    # --------------------------------------------------------
+    def analyze(self, image_path: str, subject_type: str) -> Dict:
+        """
+        分析照片的构图要素
+
+        Args:
+            image_path: 照片路径
+            subject_type: 题材类型（portrait/landscape/documentary等）
+
+        Returns:
+            构图分析结果字典
+        """
+        # 1. 读取图像
+        img = cv2.imread(image_path)
+        if img is None:
+            return {"error": "无法读取图像"}
+
+        h, w = img.shape[:2]
+        diag = np.sqrt(h**2 + w**2)
+
+        # 2. 预处理：转换为灰度图
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # 3. 执行各项分析
+        results = {}
+
+        # 3.1 水平线检测
+        results["horizon"] = self._detect_horizon(gray, h, w)
+
+        # 3.2 三分法分析
+        results["rule_of_thirds"] = self._analyze_rule_of_thirds(img, gray)
+
+        # 3.3 对称性分析
+        results["symmetry"] = self._analyze_symmetry(gray, h, w)
+
+        # 3.4 引导线检测
+        results["leading_lines"] = self._detect_leading_lines(gray, diag)
+
+        # 3.5 前景纵深分析
+        results["foreground_depth"] = self._analyze_foreground_depth(gray, h)
+
+        # 3.6 负空间分析
+        results["negative_space"] = self._analyze_negative_space(gray, h, w)
+
+        # 3.7 主体位置分析
+        results["subject_position"] = self._detect_subject_position(img, h, w)
+
+        # 4. 综合评分
+        results["score"] = self._calculate_composition_score(
+            results, subject_type
+        )
+
+        # 5. 生成建议
+        results["suggestions"] = self._generate_suggestions(results, subject_type)
+
+        # 6. 生成标注图
+        results["annotated_image"] = self._generate_annotation(
+            img.copy(), results
+        )
+
+        return results
+
+    # --------------------------------------------------------
+    # 水平线检测
+    # --------------------------------------------------------
+    def _detect_horizon(self, gray: np.ndarray,
+                        h: int, w: int) -> Dict:
+        """
+        使用霍夫变换检测水平线
+        """
+        result = {
+            "detected": False,
+            "angle": 0.0,          # 倾斜角度（度）
+            "y_position": None,     # Y坐标（画面比例）
+            "position_label": "none",  # upper/middle/lower
+            "needs_correction": False,
+            "correction_angle": 0.0,
+        }
+
+        # Canny边缘检测
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+        # 霍夫线变换
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi/180,
+            threshold=100,
+            minLineLength=w * 0.3,
+            maxLineGap=20
+        )
+
+        if lines is None:
+            return result
+
+        # 筛选接近水平的线段（角度偏差 < 5度）
+        horizontal_lines = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if angle < 5 or (180 - angle) < 5:
+                horizontal_lines.append((x1, y1, x2, y2, angle))
+
+        if not horizontal_lines:
+            return result
+
+        # 取最长的水平线作为主水平线
+        longest_line = max(
+            horizontal_lines,
+            key=lambda l: np.sqrt((l[2]-l[0])**2 + (l[3]-l[1])**2)
+        )
+        x1, y1, x2, y2, angle = longest_line
+
+        # 计算倾斜角度
+        tilt_angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+
+        result["detected"] = True
+        result["angle"] = round(tilt_angle, 2)
+        result["y_position"] = round((y1 + y2) / 2 / h, 3)
+
+        # 判断水平线在画面中的位置
+        y_ratio = result["y_position"]
+        if y_ratio < 0.33:
+            result["position_label"] = "upper"
+        elif y_ratio > 0.67:
+            result["position_label"] = "lower"
+        else:
+            result["position_label"] = "middle"
+
+        # 判断是否需要校正
+        if abs(tilt_angle) > 1.0:
+            result["needs_correction"] = True
+            result["correction_angle"] = -tilt_angle
+
+        return result
+
+    # --------------------------------------------------------
+    # 三分法分析
+    # --------------------------------------------------------
+    def _analyze_rule_of_thirds(self, img: np.ndarray,
+                                 gray: np.ndarray) -> Dict:
+        """
+        分析照片是否符合三分法则
+        """
+        h, w = img.shape[:2]
+
+        result = {
+            "match_score": 0.0,      # 0-1，三分法匹配度
+            "power_points": [],       # 四个交叉点的坐标
+            "subject_near_points": [], # 主体靠近的交叉点
+            "grid_alignment": 0.0,    # 网格对齐度
+        }
+
+        # 计算三分法交叉点
+        third_h = h / 3
+        third_w = w / 3
+        power_points = [
+            (third_w, third_h),        # 左上
+            (2 * third_w, third_h),    # 右上
+            (third_w, 2 * third_h),    # 左下
+            (2 * third_w, 2 * third_h) # 右下
+        ]
+        result["power_points"] = power_points
+
+        # 检测显著区域（使用显著性检测或边缘密度）
+        saliency = self._compute_saliency(gray)
+
+        # 检查显著区域中心与交叉点的距离
+        significant_regions = self._find_significant_regions(saliency)
+        if significant_regions:
+            for region_cx, region_cy in significant_regions:
+                distances = []
+                for px, py in power_points:
+                    dist = np.sqrt((region_cx - px)**2 + (region_cy - py)**2)
+                    distances.append(dist)
+                min_dist = min(distances)
+                closest_idx = distances.index(min_dist)
+
+                # 如果距离小于画面对角线的10%，认为靠近交叉点
+                diag = np.sqrt(h**2 + w**2)
+                if min_dist < diag * 0.1:
+                    result["subject_near_points"].append(closest_idx)
+
+            # 计算匹配度
+            match_ratio = len(result["subject_near_points"]) / len(power_points)
+            result["match_score"] = round(min(1.0, match_ratio), 2)
+
+        # 网格线对齐分析
+        # 检查主要边缘是否落在三分线上
+        edges_h, edges_v = self._detect_edge_alignment(gray, h, w)
+        result["grid_alignment"] = round(
+            self._calculate_grid_alignment(edges_h, edges_v, h, w), 2
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # 对称性分析
+    # --------------------------------------------------------
+    def _analyze_symmetry(self, gray: np.ndarray,
+                           h: int, w: int) -> Dict:
+        """
+        分析画面的对称性
+        """
+        result = {
+            "vertical_symmetry": 0.0,   # 左右对称度 0-1
+            "horizontal_symmetry": 0.0,   # 上下对称度 0-1
+            "overall_symmetry": 0.0,      # 综合对称度
+            "type": "none",               # vertical/horizontal/both/none
+        }
+
+        # 左右对称
+        left_half = gray[:, :w//2]
+        right_half = gray[:, w//2:]
+        right_half_flipped = cv2.flip(right_half, 1)
+
+        # 调整尺寸以匹配
+        min_w = min(left_half.shape[1], right_half_flipped.shape[1])
+        left_resized = left_half[:, :min_w]
+        right_resized = right_half_flipped[:, :min_w]
+
+        v_sim = self._calculate_similarity(left_resized, right_resized)
+        result["vertical_symmetry"] = round(v_sim, 2)
+
+        # 上下对称
+        top_half = gray[:h//2, :]
+        bottom_half = gray[h//2:, :]
+        bottom_half_flipped = cv2.flip(bottom_half, 0)
+
+        min_h = min(top_half.shape[0], bottom_half_flipped.shape[0])
+        top_resized = top_half[:min_h, :]
+        bottom_resized = bottom_half_flipped[:min_h, :]
+
+        h_sim = self._calculate_similarity(top_resized, bottom_resized)
+        result["horizontal_symmetry"] = round(h_sim, 2)
+
+        # 综合对称度和类型判断
+        threshold = 0.7
+        if v_sim > threshold and h_sim > threshold:
+            result["overall_symmetry"] = round((v_sim + h_sim) / 2, 2)
+            result["type"] = "both"
+        elif v_sim > threshold:
+            result["overall_symmetry"] = round(v_sim, 2)
+            result["type"] = "vertical"
+        elif h_sim > threshold:
+            result["overall_symmetry"] = round(h_sim, 2)
+            result["type"] = "horizontal"
+        else:
+            result["overall_symmetry"] = round(max(v_sim, h_sim), 2)
+            result["type"] = "none"
+
+        return result
+
+    # --------------------------------------------------------
+    # 引导线检测
+    # --------------------------------------------------------
+    def _detect_leading_lines(self, gray: np.ndarray,
+                               diag: float) -> Dict:
+        """
+        使用霍夫变换检测引导线
+        """
+        result = {
+            "detected": False,
+            "lines": [],
+            "types": [],     # diagonal/horizontal/vertical/radiating
+            "line_count": 0,
+            "has_s_curve": False,
+        }
+
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi/180,
+            threshold=80,
+            minLineLength=diag * 0.2,
+            maxLineGap=30
+        )
+
+        if lines is None:
+            return result
+
+        min_length = diag * self.min_line_length_ratio
+        detected_lines = []
+
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+            angle = np.abs(np.arctan2(y2-y1, x2-x1) * 180 / np.pi)
+
+            if length < min_length:
+                continue
+
+            # 分类线型
+            if angle < 15 or (180 - angle) < 15:
+                line_type = "horizontal"
+            elif 75 < angle < 105:
+                line_type = "vertical"
+            elif 20 < angle < 70 or 110 < angle < 160:
+                line_type = "diagonal"
+            else:
+                line_type = "other"
+
+            detected_lines.append({
+                "start": (int(x1), int(y1)),
+                "end": (int(x2), int(y2)),
+                "length": round(length),
+                "angle": round(angle, 1),
+                "type": line_type,
+            })
+
+        result["lines"] = detected_lines
+        result["line_count"] = len(detected_lines)
+        result["detected"] = len(detected_lines) > 0
+        result["types"] = list(set(l["type"] for l in detected_lines))
+
+        # S形曲线检测（简化版）
+        result["has_s_curve"] = self._detect_s_curve(edges)
+
+        return result
+
+    # --------------------------------------------------------
+    # 前景纵深分析
+    # --------------------------------------------------------
+    def _analyze_foreground_depth(self, gray: np.ndarray,
+                                   h: int) -> Dict:
+        """
+        分析前景/中景/远景的清晰度层次
+        """
+        result = {
+            "has_depth_layers": False,
+            "fg_sharpness": 0.0,
+            "mg_sharpness": 0.0,
+            "bg_sharpness": 0.0,
+            "depth_score": 0.0,    # 0-1，纵深层次感
+        }
+
+        # 将图像分为三个区域
+        fg_region = gray[int(h*0.7):, :]          # 前景（底部30%）
+        mg_region = gray[int(h*0.3):int(h*0.7), :]  # 中景
+        bg_region = gray[:int(h*0.3), :]            # 远景（顶部30%）
+
+        # 计算各区域的清晰度（拉普拉斯方差）
+        result["fg_sharpness"] = round(cv2.Laplacian(fg_region, cv2.CV_64F).var(), 1)
+        result["mg_sharpness"] = round(cv2.Laplacian(mg_region, cv2.CV_64F).var(), 1)
+        result["bg_sharpness"] = round(cv2.Laplacian(bg_region, cv2.CV_64F).var(), 1)
+
+        # 判断是否有明显的纵深层次
+        sharpness_values = [result["fg_sharpness"], result["mg_sharpness"], result["bg_sharpness"]]
+        sharpness_range = max(sharpness_values) - min(sharpness_values)
+        sharpness_mean = np.mean(sharpness_values)
+
+        result["has_depth_layers"] = sharpness_range > sharpness_mean * 0.3
+        result["depth_score"] = round(min(1.0, sharpness_range / sharpness_mean), 2)
+
+        return result
+
+    # --------------------------------------------------------
+    # 负空间分析
+    # --------------------------------------------------------
+    def _analyze_negative_space(self, gray: np.ndarray,
+                                 h: int, w: int) -> Dict:
+        """
+        分析画面的负空间（留白）比例
+        """
+        result = {
+            "negative_ratio": 0.0,    # 负空间占比 0-1
+            "category": "balanced",    # minimal/balanced/abundant/excessive
+            "description": "",
+        }
+
+        # 使用边缘密度和亮度均匀性判断负空间
+        edges = cv2.Canny(gray, 30, 100)
+        edge_density = np.sum(edges > 0) / (h * w)
+
+        # 低边缘密度区域 = 负空间
+        # 使用自适应阈值判断低信息区域
+        block_size = 64
+        blocks_h = h // block_size
+        blocks_w = w // block_size
+        low_info_blocks = 0
+        total_blocks = blocks_h * blocks_w
+
+        for i in range(blocks_h):
+            for j in range(blocks_w):
+                block = edges[i*block_size:(i+1)*block_size,
+                             j*block_size:(j+1)*block_size]
+                if np.mean(block) < 10:  # 低边缘密度
+                    low_info_blocks += 1
+
+        result["negative_ratio"] = round(low_info_blocks / total_blocks, 2)
+
+        # 分类
+        ratio = result["negative_ratio"]
+        if ratio < 0.2:
+            result["category"] = "minimal"
+            result["description"] = "留白较少，画面紧凑"
+        elif ratio < 0.4:
+            result["category"] = "balanced"
+            result["description"] = "留白适度，平衡感好"
+        elif ratio < 0.6:
+            result["category"] = "abundant"
+            result["description"] = "大量留白，画面有呼吸感"
+        else:
+            result["category"] = "excessive"
+            result["description"] = "留白过多，主体可能偏小"
+
+        return result
+
+    # --------------------------------------------------------
+    # 辅助方法
+    # --------------------------------------------------------
+    def _compute_saliency(self, gray: np.ndarray) -> np.ndarray:
+        """计算显著性图（简化版：使用高斯差分）"""
+        blur1 = cv2.GaussianBlur(gray, (5, 5), 1.0)
+        blur2 = cv2.GaussianBlur(gray, (5, 5), 3.0)
+        saliency = np.abs(blur1.astype(float) - blur2.astype(float))
+        return saliency
+
+    def _find_significant_regions(self, saliency: np.ndarray,
+                                   threshold_factor: float = 2.0) -> List[Tuple]:
+        """找到显著性区域的重心"""
+        threshold = np.mean(saliency) * threshold_factor
+        _, binary = cv2.threshold(
+            (saliency * 255).astype(np.uint8),
+            int(threshold * 255), 255, cv2.THRESH_BINARY
+        )
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        regions = []
+        for cnt in contours:
+            M = cv2.moments(cnt)
+            if M["m00"] > 100:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                regions.append((cx, cy))
+
+        return regions[:5]  # 最多返回5个显著区域
+
+    def _detect_edge_alignment(self, gray, h, w):
+        """检测边缘与三分线的对齐情况"""
+        edges = cv2.Canny(gray, 50, 150)
+        edges_h = np.sum(edges, axis=1)   # 水平边缘分布
+        edges_v = np.sum(edges, axis=0)   # 垂直边缘分布
+        return edges_h, edges_v
+
+    def _calculate_grid_alignment(self, edges_h, edges_v, h, w):
+        """计算边缘与三分线的对齐度"""
+        third_h1, third_h2 = h // 3, 2 * h // 3
+        third_w1, third_w2 = w // 3, 2 * w // 3
+
+        # 检查三分线附近的边缘密度
+        window = max(h, w) // 20
+        h_alignment = (
+            np.mean(edges_h[max(0, third_h1-window):third_h1+window]) +
+            np.mean(edges_h[max(0, third_h2-window):third_h2+window])
+        ) / 2
+        v_alignment = (
+            np.mean(edges_v[max(0, third_w1-window):third_w1+window]) +
+            np.mean(edges_v[max(0, third_w2-window):third_w2+window])
+        ) / 2
+
+        # 归一化
+        max_density = max(np.max(edges_h), np.max(edges_v), 1)
+        return (h_alignment + v_alignment) / (2 * max_density)
+
+    def _calculate_similarity(self, img1, img2) -> float:
+        """计算两张图像的相似度（SSIM简化版）"""
+        # 使用结构相似性的简化版本
+        mse = np.mean((img1.astype(float) - img2.astype(float)) ** 2)
+        max_pixel = 255.0
+        return 1.0 - (mse / (max_pixel ** 2))
+
+    def _detect_s_curve(self, edges: np.ndarray) -> bool:
+        """简化版S形曲线检测"""
+        # 在中间行检测水平方向的边缘分布
+        # 如果存在从一侧到另一侧的连续弧形边缘，判定为S曲线
+        # （完整实现需要轮廓追踪和曲率分析）
+        return False  # 简化版暂不实现
+
+    def _detect_subject_position(self, img, h, w) -> Dict:
+        """检测主体在画面中的位置"""
+        # 使用显著性检测找到主体位置
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        saliency = self._compute_saliency(gray)
+        regions = self._find_significant_regions(saliency)
+
+        if not regions:
+            return {"position": "center", "x_ratio": 0.5, "y_ratio": 0.5}
+
+        # 取最大的显著区域
+        main_region = regions[0]
+        x_ratio = main_region[0] / w
+        y_ratio = main_region[1] / h
+
+        # 判断位置
+        if x_ratio < 0.33:
+            position = "left"
+        elif x_ratio > 0.67:
+            position = "right"
+        elif y_ratio < 0.33:
+            position = "top"
+        elif y_ratio > 0.67:
+            position = "bottom"
+        else:
+            position = "center"
+
+        return {
+            "position": position,
+            "x_ratio": round(x_ratio, 3),
+            "y_ratio": round(y_ratio, 3),
+        }
+
+    # --------------------------------------------------------
+    # 综合评分
+    # --------------------------------------------------------
+    def _calculate_composition_score(self, results: Dict,
+                                     subject_type: str) -> float:
+        """计算构图综合评分"""
+        score = 70  # 基础分
+
+        # 水平线（权重15%）
+        horizon = results.get("horizon", {})
+        if horizon.get("detected", False):
+            if not horizon.get("needs_correction", False):
+                score += 10
+            else:
+                angle = abs(horizon.get("angle", 0))
+                score -= min(10, angle * 2)
+
+        # 三分法（权重25%）
+        rot = results.get("rule_of_thirds", {})
+        score += rot.get("match_score", 0) * 15
+
+        # 引导线（权重15%）
+        lines = results.get("leading_lines", {})
+        if lines.get("detected", False):
+            score += min(10, lines.get("line_count", 0) * 2)
+
+        # 纵深层（权重15%）
+        depth = results.get("foreground_depth", {})
+        if depth.get("has_depth_layers", False):
+            score += min(10, depth.get("depth_score", 0) * 10)
+
+        # 对称性（权重10%）
+        sym = results.get("symmetry", {})
+        if sym.get("type") in ("vertical", "both"):
+            score += 5
+
+        return round(min(100, max(0, score)), 1)
+
+    # --------------------------------------------------------
+    # 生成建议
+    # --------------------------------------------------------
+    def _generate_suggestions(self, results: Dict,
+                                subject_type: str) -> List[str]:
+        """根据分析结果生成构图改进建议"""
+        suggestions = []
+
+        horizon = results.get("horizon", {})
+        if horizon.get("needs_correction", False):
+            angle = horizon["correction_angle"]
+            suggestions.append(
+                f"[高优先] 水平线倾斜{abs(angle):.1f}度，"
+                f"建议旋转{angle:.1f}度校正"
+            )
+
+        rot = results.get("rule_of_thirds", {})
+        if rot.get("match_score", 0) < 0.3:
+            suggestions.append(
+                "[中优先] 主体位置偏离三分法交叉点，"
+                "考虑调整构图或裁剪"
+            )
+
+        depth = results.get("foreground_depth", {})
+        if not depth.get("has_depth_layers", False) and subject_type == "landscape":
+            suggestions.append(
+                "[中优先] 画面缺少前景纵深层次，"
+                "尝试加入前景元素（岩石/花草/道路）"
+            )
+
+        neg = results.get("negative_space", {})
+        if neg.get("category") == "excessive":
+            suggestions.append(
+                "[低优先] 留白过多，考虑裁剪放大主体"
+            )
+        elif neg.get("category") == "minimal" and subject_type != "street":
+            suggestions.append(
+                "[低优先] 留白较少，画面偏拥挤，考虑给主体更多空间"
+            )
+
+        if not suggestions:
+            suggestions.append("构图整体良好，无明显问题")
+
+        return suggestions
+
+    # --------------------------------------------------------
+    # 生成标注图
+    # --------------------------------------------------------
+    def _generate_annotation(self, img: np.ndarray,
+                             results: Dict) -> np.ndarray:
+        """在图像上绘制构图标注"""
+        h, w = img.shape[:2]
+
+        # 绘制九宫格线
+        overlay = img.copy()
+        line_color = (255, 255, 255, 128)  # 半透明白色
+
+        for i in range(1, 3):
+            # 水平线
+            y = h * i // 3
+            cv2.line(overlay, (0, y), (w, y), (255, 255, 255), 1)
+            # 垂直线
+            x = w * i // 3
+            cv2.line(overlay, (x, 0), (x, h), (255, 255, 255), 1)
+
+        # 绘制交叉点
+        rot = results.get("rule_of_thirds", {})
+        for px, py in rot.get("power_points", []):
+            cv2.circle(overlay, (int(px), int(py)), 5, (0, 0, 255), -1)
+
+        # 绘制检测到的引导线
+        lines = results.get("leading_lines", {})
+        for line in lines.get("lines", []):
+            cv2.line(
+                overlay,
+                line["start"], line["end"],
+                (0, 255, 255), 1
+            )
+
+        # 绘制水平线标注
+        horizon = results.get("horizon", {})
+        if horizon.get("detected", False):
+            color = (0, 0, 255) if horizon.get("needs_correction") else (0, 255, 0)
+            # （此处应绘制检测到的水平线）
+
+        return overlay
+
+
+# ============================================================
+# 独立测试函数
+# ============================================================
+def check_horizon(image_path: str) -> Dict:
+    """快速检查水平线"""
+    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    analyzer = CompositionAnalyzer()
+    return analyzer._detect_horizon(gray, img.shape[0], img.shape[1])
+
+
+def check_rule_of_thirds(image_path: str) -> Dict:
+    """快速检查三分法"""
+    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    analyzer = CompositionAnalyzer()
+    return analyzer._analyze_rule_of_thirds(img, gray)
+
+
+def detect_subject_position(image_path: str) -> Dict:
+    """快速检测主体位置"""
+    img = cv2.imread(image_path)
+    analyzer = CompositionAnalyzer()
+    return analyzer._detect_subject_position(img, img.shape[0], img.shape[1])
