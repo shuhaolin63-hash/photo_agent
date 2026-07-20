@@ -49,7 +49,7 @@ tech_stack:
   clip:
     provider: "openai"
     model: "ViT-L/14@336px"
-   用途:
+   usage:
       - 场景自动识别（人像/风光/纪实/星空/静物）
       - 摄影风格标签匹配
       - 情绪氛围分类
@@ -64,7 +64,7 @@ tech_stack:
   sam:
     provider: "meta"
     model: "sam2.1-hiera-large"
-    用途:
+    usage:
       - 主体自动分割（人像抠图、前景提取）
       - 遮挡区域检测
       - 不完整构图区域定位
@@ -76,7 +76,7 @@ tech_stack:
   # ---- 图像处理引擎（OpenCV）----
   opencv:
     version: "4.10.0"
-    功能模块:
+    modules:
       - 构图分析:
           - 三分线网格检测
           - 黄金比例螺旋叠加
@@ -134,7 +134,7 @@ agents:
       - 表情与情绪捕捉评估
       - 姿态与肢体语言诊断
       - 道具与场景协调性分析
-    对标大师:
+    reference_masters:
       - "安妮·莱博维茨（Annie Leibovitz）- 叙事性人像"
       - "优素福·卡什（Yousuf Karsh）- 经典肖像"
       - "理查德·阿维顿（Richard Avedon）- 极简人像"
@@ -159,8 +159,8 @@ agents:
       - 光线时段质量评估（黄金时段/蓝调时刻/正午）
       - 色彩层次与大气透视分析
       - 水面倒影与对称构图检测
-      -HDR曝光合理性评估
-    对标大师:
+      - HDR曝光合理性评估
+    reference_masters:
       - "安塞尔·亚当斯（Ansel Adams）- 区域曝光法大师"
       - "迈克尔·肯纳（Michael Kenna）- 极简风光"
       - "简·贝克（Jan Beck）- 湿版风光"
@@ -186,7 +186,7 @@ agents:
       - 画面信息密度与干扰元素检测
       - 焦段选择与透视关系分析
       - 黑白/彩色选择合理性
-    对标大师:
+    reference_masters:
       - "亨利·卡蒂埃-布列松（Henri Cartier-Bresson）- 决定性瞬间"
       - "罗伯特·卡帕（Robert Capa）- 战地纪实"
       - "多萝西娅·兰格（Dorothea Lange）- 社会纪实"
@@ -213,7 +213,7 @@ agents:
       - 色彩还原准确度（星云色彩）
       - ISO噪声与信噪比分析
       - 极光形态与色彩诊断
-    对标大师:
+    reference_masters:
       - "罗杰·尼恩（Roger Niven）- 银河拱桥"
       - "叶梓颐（Ye Ziyi）- 中国星空"
       - "阿兰·蒂耶里（Alain Tirilly）- 极光"
@@ -237,7 +237,7 @@ agents:
       - 质感呈现（金属光泽/木纹/织物纹理）
       - 透视畸变与校正建议
       - 透视与景深控制
-    对标大师:
+    reference_masters:
       - "爱德华·韦斯顿（Edward Weston）- 经典静物"
       - "欧文·佩恩（Irving Penn）- 时尚静物"
       - "安德烈·科特兹（Andre Kertesz）- 抽象静物"
