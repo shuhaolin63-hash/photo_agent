@@ -19,7 +19,7 @@ import urllib.error
 from pathlib import Path
 
 # 基础配置
-BASE_DIR = Path("f:/aichatcut/photo_agent/reference/master_works/other_master_photos")
+BASE_DIR = Path(__file__).resolve().parent.parent / "reference" / "master_works" / "other_master_photos"
 CATEGORIES = {
     "starry": [
         "milky-way-astro",
