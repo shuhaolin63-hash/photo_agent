@@ -49,7 +49,7 @@ tech_stack:
   clip:
     provider: "openai"
     model: "ViT-L/14@336px"
-   usage:
+    usage:
       - 场景自动识别（人像/风光/纪实/星空/静物）
       - 摄影风格标签匹配
       - 情绪氛围分类
